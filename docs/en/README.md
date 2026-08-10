@@ -5,7 +5,7 @@ in Rust. It accepts a programming goal and continuously plans, modifies code,
 runs commands, tests, debugs, and evaluates results â€?and improves its own
 Rhai execution scripts within a safe boundary.
 
-> **Status: v0.1.0 released.** The full single-machine loop is working:
+> **Status: v0.2.0 released.** The full single-machine loop is working:
 > planning, script-driven execution, verification, event-sourced persistence
 > with crash recovery, hot-reloadable Rhai strategies, and validated
 > self-evolution with rollback. See [ROADMAP.md](./ROADMAP.md) for the phase
@@ -192,7 +192,7 @@ file = "agent.log"
 The LLM key is provided through the `AGENT_API_KEY` environment variable to
 keep it out of the committed configuration file.
 
-## v0.1.0 completion criteria
+## v0.2.0 completion criteria
 
 The first stable release:
 
@@ -207,7 +207,7 @@ The first stable release:
 - passes a security review, fault-injection tests, and at least 24 hours of
   stability testing.
 
-> v0.1.0 acceptance status: all project gates (fmt / clippy / test) pass;
+> v0.2.0 acceptance status: all project gates (fmt / clippy / test) pass;
 > sandbox end-to-end tasks, crash recovery, budget boundaries, script hot
 > reload, evolution fixes and rollback, and stability cycle tests are
 > automated. The 24-hour soak test ships as an `#[ignore]` test
@@ -215,7 +215,7 @@ The first stable release:
 
 ## Explicit non-goals
 
-v0.1.0 does not provide:
+v0.2.0 does not provide:
 
 - a graphical interface or interactive terminal,
 - distributed clusters or parallel multi-agent scheduling,

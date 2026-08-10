@@ -1,6 +1,6 @@
 # SPECS ï¿?Lemon Agent Technical Specification
 
-> **Version**: 0.1.0
+> **Version**: 0.2.0
 > **Goal**: Build an AI agent written from scratch in Rust that supports
 > unattended long-running autonomous programming and self-evolution.
 > **Core principles**: minimal dependencies, high performance, safe isolation,
