@@ -4,3 +4,5 @@
 *.db
 /agent.log
 *.log
+/scripts/*.bak
+/scripts/.validation

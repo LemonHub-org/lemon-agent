@@ -4,7 +4,6 @@ pub mod budget;
 pub mod context;
 pub mod loop_runner;
 pub mod plan;
-pub mod tools;
 
 use std::sync::Arc;
 
@@ -14,6 +13,8 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::error::Result;
+use crate::evolution::EvolutionEngine;
+use crate::evolution::script_engine::ScriptEngine;
 use crate::kernel::capability::CapabilitySet;
 use crate::kernel::event_store::{EventStore, EventType, StoredSnapshot};
 use crate::kernel::sandbox::Sandbox;
@@ -79,13 +80,14 @@ pub struct Agent {
     pub sandbox: Arc<Sandbox>,
     pub llm: Arc<LLMClient>,
     pub token: CapabilitySet,
+    pub scripts: Arc<ScriptEngine>,
+    pub evolution: EvolutionEngine,
     pub continuity_id: String,
     pub state: AgentState,
     pub ctx: Context,
     pub budget: Budget,
     pub plan: Option<Plan>,
     pub plan_failed_reason: Option<String>,
-    pub replan_context: Option<String>,
     pub evolution_attempts: usize,
     pub initial_prompt: String,
     pub termination: Option<TerminationReason>,
@@ -117,12 +119,27 @@ impl Agent {
             .with_event_store(store.clone()),
         );
         let llm = Arc::new(LLMClient::new(&config.llm)?);
+        let scripts = Arc::new(ScriptEngine::new(
+            config.agent.scripts_dir.clone(),
+            CapabilitySet::full(),
+            sandbox.clone(),
+            Some(llm.clone()),
+            Some(store.clone()),
+        )?);
+        let evolution = EvolutionEngine::new(
+            llm.clone(),
+            store.clone(),
+            scripts.clone(),
+            config.agent.max_evolution_attempts,
+        );
 
         let mut agent = Agent {
             store: store.clone(),
             sandbox: sandbox.clone(),
             llm,
             token: CapabilitySet::full(),
+            scripts,
+            evolution,
             continuity_id: String::new(),
             state: AgentState::Idle,
             ctx: Context::new(config.agent.max_context_tokens, 6),
@@ -136,7 +153,6 @@ impl Agent {
             ),
             plan: None,
             plan_failed_reason: None,
-            replan_context: None,
             evolution_attempts: 0,
             initial_prompt: String::new(),
             termination: None,
@@ -174,6 +190,8 @@ impl Agent {
             agent.pending_task = task;
         }
         sandbox.set_continuity(&agent.continuity_id);
+        agent.scripts.set_continuity(&agent.continuity_id);
+        agent.evolution.set_attempts_used(agent.evolution_attempts);
         Ok(agent)
     }
 
@@ -209,7 +227,6 @@ impl Agent {
             "initial_prompt": self.initial_prompt,
             "plan": self.plan,
             "plan_failed_reason": self.plan_failed_reason,
-            "replan_context": self.replan_context,
             "evolution_attempts": self.evolution_attempts,
             "messages": self.ctx.messages(),
             "budget": self.budget,
@@ -238,14 +255,11 @@ impl Agent {
             .get("plan_failed_reason")
             .and_then(Value::as_str)
             .map(str::to_string);
-        self.replan_context = state
-            .get("replan_context")
-            .and_then(Value::as_str)
-            .map(str::to_string);
         self.evolution_attempts = state
             .get("evolution_attempts")
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
+        self.evolution.set_attempts_used(self.evolution_attempts);
         let messages: Vec<crate::llm::Message> = state
             .get("messages")
             .and_then(|v| serde_json::from_value(v.clone()).ok())

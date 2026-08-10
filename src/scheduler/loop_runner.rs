@@ -3,13 +3,14 @@
 
 use std::time::Duration;
 
-use serde_json::{Value, json};
-
 use crate::error::{Error, Result};
-use crate::kernel::event_store::{EventType, ToolOutcome, now_ms};
+use crate::evolution::{
+    EvolutionContext, EvolutionOutcome, STRATEGY_SCRIPT, ValidationSpec, recent_messages,
+    recent_tool_results,
+};
+use crate::kernel::event_store::{EventType, now_ms};
 use crate::llm::Message;
 use crate::scheduler::plan::KNOWN_TOOLS;
-use crate::scheduler::tools::{ToolComponents, dispatch};
 use crate::scheduler::{Agent, AgentState, ContinuityReport, TerminationReason};
 
 const PLAN_SYSTEM_PROMPT: &str = r#"You are Lemon Agent, an autonomous software engineering agent running inside a sandboxed working directory. You receive a task, inspect the workspace with tools, modify files, and verify your work by running commands.
@@ -113,11 +114,6 @@ impl Agent {
             self.ctx.push(Message::system(PLAN_SYSTEM_PROMPT));
             self.ctx.push(Message::user(&self.initial_prompt));
         }
-        if let Some(context) = self.replan_context.take() {
-            self.ctx.push(Message::user(format!(
-                "The previous plan failed. Reason:\n{context}\nProduce a revised plan."
-            )));
-        }
 
         let mut failures = 0;
         let mut last_failure = String::new();
@@ -200,36 +196,22 @@ impl Agent {
             return Ok((AgentState::Terminated, events));
         };
 
-        for step in &plan.steps {
-            self.budget.record_tool_call();
-            let result = if step.tool == "llm_query" {
-                self.llm_query_step(&step.name, &step.args, &mut events)
-                    .await
-            } else {
-                let components = ToolComponents {
-                    sandbox: &self.sandbox,
-                    token: &self.token,
-                    llm: None,
-                    on_llm_request: None,
-                };
-                dispatch(&components, &step.tool, &step.args).await
-            };
-
-            match result {
-                Ok(value) => {
-                    let rendered = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
-                    self.ctx
-                        .push_tool_result(&step.tool, &rendered, self.tool_result_max_chars);
-                }
-                Err(e) => {
-                    let reason = format!("step {:?} (tool {}) failed: {e}", step.name, step.tool);
-                    self.plan_failed_reason = Some(reason.clone());
-                    events.push(EventType::Error {
-                        error: reason,
-                        recoverable: true,
-                    });
-                    break;
-                }
+        // The strategy script owns plan execution: it runs the steps and the
+        // verification command with the sandboxed tools. Its errors become
+        // the failure reason that drives the Evolving state.
+        self.budget.record_tool_call();
+        match self.scripts.execute_plan(STRATEGY_SCRIPT, &plan).await {
+            Ok(message) => {
+                self.ctx
+                    .push_tool_result("script", &message, self.tool_result_max_chars);
+            }
+            Err(e) => {
+                let reason = format!("strategy script failed: {e}");
+                self.plan_failed_reason = Some(reason.clone());
+                events.push(EventType::Error {
+                    error: reason,
+                    recoverable: true,
+                });
             }
         }
 
@@ -246,42 +228,6 @@ impl Agent {
             return Ok((AgentState::Evolving, events));
         }
 
-        let verify = self.plan.as_ref().and_then(|p| p.verify.clone());
-        if let Some(verify) = verify {
-            self.budget.record_tool_call();
-            match self
-                .sandbox
-                .exec_command(&self.token, &verify.cmd, &verify.args)
-                .await
-            {
-                Ok(output) if output.exit_code == 0 => {
-                    let rendered = serde_json::to_string(&output).unwrap_or_else(|_| "{}".into());
-                    self.ctx
-                        .push_tool_result("verify", &rendered, self.tool_result_max_chars);
-                }
-                Ok(output) => {
-                    let reason = format!("verification failed: exit code {}", output.exit_code);
-                    self.plan_failed_reason = Some(reason.clone());
-                    events.push(EventType::Error {
-                        error: reason,
-                        recoverable: true,
-                    });
-                    events.push(EventType::StepFinished { step_num });
-                    return Ok((AgentState::Evolving, events));
-                }
-                Err(e) => {
-                    let reason = format!("verification failed: {e}");
-                    self.plan_failed_reason = Some(reason.clone());
-                    events.push(EventType::Error {
-                        error: reason,
-                        recoverable: true,
-                    });
-                    events.push(EventType::StepFinished { step_num });
-                    return Ok((AgentState::Evolving, events));
-                }
-            }
-        }
-
         self.termination = Some(TerminationReason::Completed);
         events.push(EventType::StepFinished { step_num });
         Ok((AgentState::Terminated, events))
@@ -290,21 +236,50 @@ impl Agent {
     async fn handle_evolving(&mut self) -> Result<(AgentState, Vec<EventType>)> {
         let mut events = Vec::new();
         let step_num = self.start_step(&mut events);
-        self.evolution_attempts += 1;
 
-        if self.evolution_attempts >= self.max_evolution_attempts {
-            let reason = self
-                .plan_failed_reason
-                .take()
-                .unwrap_or_else(|| "evolution attempts exhausted".to_string());
-            self.termination = Some(TerminationReason::Failed(reason));
-            events.push(EventType::StepFinished { step_num });
-            return Ok((AgentState::Terminated, events));
+        let error = self
+            .plan_failed_reason
+            .take()
+            .unwrap_or_else(|| "unknown failure".to_string());
+        let script_source = self
+            .scripts
+            .scripts_dir()
+            .join(format!("{STRATEGY_SCRIPT}.rhai"))
+            .to_string_lossy()
+            .into_owned();
+        let script_source = std::fs::read_to_string(&script_source).unwrap_or_default();
+
+        let stored_events = self.store.events_after(&self.continuity_id, 0)?;
+        let ctx = EvolutionContext {
+            continuity_id: self.continuity_id.clone(),
+            step_num,
+            error,
+            script_name: STRATEGY_SCRIPT.to_string(),
+            script_source,
+            recent_messages: recent_messages(self.ctx.messages(), 10),
+            recent_tool_results: recent_tool_results(&stored_events, 5),
+            validation: ValidationSpec::TestEntry,
+        };
+
+        match self.evolution.attempt(&ctx).await? {
+            EvolutionOutcome::Fixed { message, .. } => {
+                self.evolution_attempts = self.evolution.attempts_used();
+                events.push(EventType::Error {
+                    error: format!("script evolved: {message}"),
+                    recoverable: true,
+                });
+                events.push(EventType::StepFinished { step_num });
+                Ok((AgentState::Executing, events))
+            }
+            EvolutionOutcome::Failed { reason } => {
+                self.evolution_attempts = self.evolution.attempts_used();
+                self.termination = Some(TerminationReason::Failed(format!(
+                    "evolution failed: {reason}"
+                )));
+                events.push(EventType::StepFinished { step_num });
+                Ok((AgentState::Terminated, events))
+            }
         }
-
-        self.replan_context = self.plan_failed_reason.take();
-        events.push(EventType::StepFinished { step_num });
-        Ok((AgentState::Planning, events))
     }
 
     /// Record a step boundary and return the step number.
@@ -313,45 +288,6 @@ impl Agent {
         let step_num = self.budget.steps_used;
         events.push(EventType::StepStarted { step_num });
         step_num
-    }
-
-    /// Execute an `llm_query` plan step with full event and budget recording.
-    async fn llm_query_step(
-        &mut self,
-        name: &str,
-        args: &Value,
-        events: &mut Vec<EventType>,
-    ) -> Result<Value> {
-        let prompt = args.get("prompt").and_then(Value::as_str).ok_or_else(|| {
-            Error::InvalidInput(format!("llm_query step {name:?} has no string prompt"))
-        })?;
-        let prompt_preview = preview(prompt, 200);
-
-        events.push(EventType::LlmRequest {
-            prompt_preview: prompt_preview.clone(),
-            tools: Vec::new(),
-        });
-        self.budget.record_llm_call(prompt.chars().count() / 4 + 4);
-
-        let result = match self.llm.chat(&[Message::user(prompt)], &[]).await {
-            Ok(response) => {
-                events.push(EventType::LlmResponse {
-                    content: preview(&response.content, 200),
-                    tool_calls: response.tool_calls.clone(),
-                });
-                Ok(json!({ "content": response.content }))
-            }
-            Err(e) => Err(e),
-        };
-        events.push(EventType::ToolCall {
-            tool_name: "llm_query".to_string(),
-            args: json!({ "prompt": prompt_preview }),
-            result: match &result {
-                Ok(value) => ToolOutcome::Ok(value.clone()),
-                Err(e) => ToolOutcome::Err(e.to_string()),
-            },
-        });
-        result
     }
 
     /// Summarize the context through the LLM when it exceeds the token limit.

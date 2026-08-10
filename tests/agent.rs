@@ -1,16 +1,60 @@
 //! End-to-end tests of the scheduler loop against a mock LLM: task
-//! completion, verification, plan evolution, budget termination, and
-//! crash-recovery resume.
+//! completion, script-driven execution, evolution fixes, rollback, budget
+//! termination, and crash-recovery resume.
 
 use lemon_agent::config::Config;
 use lemon_agent::kernel::event_store::{EventStore, EventType, now_ms};
 use lemon_agent::scheduler::{Agent, Budget};
 use serde_json::json;
 
+/// The strategy script the agent executes plans with. This one throws for
+/// every plan, simulating an injected defect that evolution must fix.
+const DEFECTIVE_SCRIPT: &str = r#"
+fn execute_plan(plan) {
+    throw "script bug: plan execution not implemented";
+}
+"#;
+
+/// A working dispatcher strategy, the kind evolution produces as a fix.
+const WORKING_SCRIPT: &str = r#"
+fn execute_plan(plan) {
+    for step in plan.steps {
+        switch step.tool {
+            "read_file" => read_file(step.args.path),
+            "write_file" => write_file(step.args.path, step.args.content),
+            "append_file" => append_file(step.args.path, step.args.content),
+            "list_dir" => list_dir(step.args.path),
+            "search_code" => search_code(step.args.query, step.args.path),
+            "exec_command" => exec_command(step.args.cmd, step.args.args),
+            "git_add_commit" => git_add_commit(step.args.message),
+            "llm_query" => llm_query(step.args.prompt),
+            "sleep" => sleep(step.args.ms),
+            _ => throw "unknown tool in plan step: " + step.tool,
+        }
+    }
+    if "verify" in plan {
+        let out = exec_command(plan.verify.cmd, plan.verify.args);
+        if out.exit_code != 0 {
+            throw "verification failed (exit " + out.exit_code + "): " + out.stderr;
+        }
+    }
+    "plan executed successfully"
+}
+
+fn test_plan_and_execute() {
+    let out = exec_command("git", ["--version"]);
+    if out.exit_code == 0 {
+        "git is available"
+    } else {
+        throw "git is unavailable"
+    }
+}
+"#;
+
 fn config(root: &std::path::Path, db: &std::path::Path, base_url: &str) -> Config {
     let mut c = Config::default();
     c.agent.work_dir = root.to_path_buf();
-    c.agent.scripts_dir = root.join("scripts");
+    c.agent.scripts_dir = root.parent().unwrap().join("scripts");
     c.agent.db_path = db.to_path_buf();
     c.agent.heartbeat_interval_secs = 0; // heartbeat on every step
     c.agent.snapshot_interval_steps = 1; // snapshot every step
@@ -37,8 +81,15 @@ fn fixture(base_url: &str) -> (tempfile::TempDir, Config) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("workspace");
     std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
     let config = config(&root, &dir.path().join("agent.db"), base_url);
     (dir, config)
+}
+
+fn write_strategy(config: &Config, source: &str) {
+    let path = config.agent.scripts_dir.join("plan_and_execute.rhai");
+    std::fs::create_dir_all(config.agent.scripts_dir.as_path()).unwrap();
+    std::fs::write(path, source).unwrap();
 }
 
 #[tokio::test]
@@ -60,6 +111,7 @@ async fn completes_task_end_to_end() {
         .await;
 
     let (dir, config) = fixture(&server.url());
+    write_strategy(&config, WORKING_SCRIPT);
     let mut agent = Agent::new(&config, Some("write a hello file".to_string())).unwrap();
     let report = agent.run().await.unwrap();
 
@@ -80,101 +132,147 @@ async fn completes_task_end_to_end() {
             .iter()
             .filter(|e| e.event.name() == "ToolCall")
             .count(),
-        3
+        3 // write_file, exec_command, verify
     );
-    let finished = events.last().unwrap().event.clone();
-    match finished {
+    match events.last().unwrap().event.clone() {
         EventType::ContinuityFinished { status, .. } => assert_eq!(status, "completed"),
         other => panic!("unexpected final event: {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn failed_verification_triggers_replan_and_completes() {
+async fn injected_script_defect_is_fixed_by_evolution() {
     let mut server = mockito::Server::new_async().await;
-    let failing_plan = json!({
+    let plan = json!({
         "steps": [
-            {"name": "write tmp", "tool": "write_file", "args": {"path": "tmp.txt", "content": "x"}}
-        ],
-        "verify": {"cmd": "git", "args": ["rev-parse", "HEAD"]}
-    });
-    let good_plan = json!({
-        "steps": [
-            {"name": "finalize", "tool": "sleep", "args": {"ms": 1}}
+            {"name": "write hello file", "tool": "write_file", "args": {"path": "hello.txt", "content": "Evolved"}}
         ]
     });
-    // Mocks are served in creation order, so the first planning call gets the
-    // failing plan and the replan call gets the good plan.
     server
         .mock("POST", "/chat/completions")
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(completion(&failing_plan.to_string()).to_string())
+        .with_body(completion(&plan.to_string()).to_string())
         .create_async()
         .await;
+    // Mocks are served in creation order: first the plan, then the evolution
+    // candidate script.
     server
         .mock("POST", "/chat/completions")
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(completion(&good_plan.to_string()).to_string())
+        .with_body(completion(WORKING_SCRIPT).to_string())
         .create_async()
         .await;
 
     let (dir, config) = fixture(&server.url());
-    let mut agent = Agent::new(&config, Some("evolve me".to_string())).unwrap();
+    write_strategy(&config, DEFECTIVE_SCRIPT);
+    let mut agent = Agent::new(&config, Some("fix my strategy".to_string())).unwrap();
     let report = agent.run().await.unwrap();
 
     assert_eq!(report.status, "completed", "{}", report.summary);
-    assert!(
-        report.steps_used >= 5,
-        "expected replan steps: {}",
-        report.steps_used
-    );
     assert!(agent.evolution_attempts >= 1, "evolution never triggered");
+    assert_eq!(
+        std::fs::read_to_string(config.agent.scripts_dir.join("plan_and_execute.rhai")).unwrap(),
+        WORKING_SCRIPT.trim(),
+        "fixed script must replace the defective one"
+    );
+    assert!(
+        std::fs::read_to_string(dir.path().join("workspace/hello.txt")).is_ok(),
+        "fixed strategy must execute the plan"
+    );
 
     let store = EventStore::open(&config.agent.db_path).unwrap();
     let events = store.events_after(&report.continuity_id, 0).unwrap();
-    let llm_responses = events
+    let attempts = events
         .iter()
-        .filter(|e| e.event.name() == "LlmResponse")
+        .filter(|e| matches!(e.event, EventType::EvolutionAttempt { .. }))
         .count();
-    assert_eq!(llm_responses, 2, "expected two planning calls");
-    let errors = events
+    assert_eq!(attempts, 1);
+    let results = events
         .iter()
-        .filter(|e| matches!(e.event, EventType::Error { .. }))
-        .count();
-    assert!(errors >= 1, "expected recorded verification failure");
-    let _ = dir;
+        .filter_map(|e| match &e.event {
+            EventType::EvolutionResult { success, .. } => Some(*success),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results, vec![true]);
+    match &events
+        .iter()
+        .find(|e| matches!(e.event, EventType::EvolutionAttempt { .. }))
+        .unwrap()
+        .event
+    {
+        EventType::EvolutionAttempt {
+            old_hash, new_hash, ..
+        } => {
+            assert_ne!(old_hash, new_hash);
+            assert!(!old_hash.starts_with("<missing>"));
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
 }
 
 #[tokio::test]
-async fn evolution_attempts_are_limited() {
+async fn bad_candidate_rolls_back_and_fails() {
     let mut server = mockito::Server::new_async().await;
-    let failing_plan = json!({
+    let plan = json!({
         "steps": [
             {"name": "write tmp", "tool": "write_file", "args": {"path": "tmp.txt", "content": "x"}}
-        ],
-        "verify": {"cmd": "git", "args": ["rev-parse", "HEAD"]}
+        ]
     });
     server
         .mock("POST", "/chat/completions")
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(completion(&failing_plan.to_string()).to_string())
+        .with_body(completion(&plan.to_string()).to_string())
+        .create_async()
+        .await;
+    // The evolution candidate is not valid Rhai.
+    server
+        .mock("POST", "/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(completion("fn execute_plan(plan) { this is not rhai").to_string())
         .create_async()
         .await;
 
     let (dir, mut config) = fixture(&server.url());
     config.agent.max_evolution_attempts = 1;
+    write_strategy(&config, DEFECTIVE_SCRIPT);
     let mut agent = Agent::new(&config, Some("doomed task".to_string())).unwrap();
     let report = agent.run().await.unwrap();
 
     assert_eq!(report.status, "failed", "{}", report.summary);
     assert!(
-        report.summary.contains("verification failed"),
+        report.summary.contains("evolution failed"),
         "{}",
         report.summary
     );
+    assert_eq!(
+        std::fs::read_to_string(config.agent.scripts_dir.join("plan_and_execute.rhai")).unwrap(),
+        DEFECTIVE_SCRIPT,
+        "failed candidate must roll back to the original"
+    );
+    assert!(
+        !config
+            .agent
+            .scripts_dir
+            .join("plan_and_execute.rhai.bak")
+            .exists(),
+        "no backup file may remain after rollback"
+    );
+
+    let store = EventStore::open(&config.agent.db_path).unwrap();
+    let events = store.events_after(&report.continuity_id, 0).unwrap();
+    let results = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            EventType::EvolutionResult { success, .. } => Some(*success),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results, vec![false]);
     let _ = dir;
 }
 
@@ -196,6 +294,7 @@ async fn budget_exhaustion_terminates_safely() {
 
     let (dir, mut config) = fixture(&server.url());
     config.agent.max_steps = 2;
+    write_strategy(&config, WORKING_SCRIPT);
     let mut agent = Agent::new(&config, Some("short task".to_string())).unwrap();
     let report = agent.run().await.unwrap();
 
@@ -230,6 +329,7 @@ async fn resumes_incomplete_continuity() {
         .await;
 
     let (dir, config) = fixture(&server.url());
+    write_strategy(&config, WORKING_SCRIPT);
 
     // Pre-seed an interrupted continuity: started, one step, snapshot in
     // Planning with one step already used.
@@ -252,7 +352,6 @@ async fn resumes_incomplete_continuity() {
         "initial_prompt": "resume me",
         "plan": null,
         "plan_failed_reason": null,
-        "replan_context": null,
         "evolution_attempts": 0,
         "messages": [],
         "budget": budget,
@@ -342,9 +441,48 @@ async fn malformed_plan_is_retried_once_then_fails() {
     let _ = dir;
 }
 
+#[tokio::test]
+async fn missing_strategy_script_evolves_one_into_existence() {
+    let mut server = mockito::Server::new_async().await;
+    let plan = json!({
+        "steps": [
+            {"name": "noop", "tool": "sleep", "args": {"ms": 1}}
+        ]
+    });
+    server
+        .mock("POST", "/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(completion(&plan.to_string()).to_string())
+        .create_async()
+        .await;
+    server
+        .mock("POST", "/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(completion(WORKING_SCRIPT).to_string())
+        .create_async()
+        .await;
+
+    // No strategy script on disk: execution fails, evolution creates one.
+    let (dir, config) = fixture(&server.url());
+    let mut agent = Agent::new(&config, Some("create strategy".to_string())).unwrap();
+    let report = agent.run().await.unwrap();
+
+    assert_eq!(report.status, "completed", "{}", report.summary);
+    assert!(
+        config
+            .agent
+            .scripts_dir
+            .join("plan_and_execute.rhai")
+            .exists(),
+        "evolution must create the missing strategy script"
+    );
+    let _ = dir;
+}
+
 #[test]
-fn plan_execution_respects_unknown_tool() {
-    // Unknown tools are rejected by plan validation before execution.
+fn plan_validation_rejects_unknown_tools() {
     let content = r#"{"steps": [{"name": "evil", "tool": "delete_everything", "args": {}}]}"#;
     let err = lemon_agent::scheduler::plan::Plan::parse(content).unwrap_err();
     assert!(err.to_string().contains("unknown tool"), "{err}");
