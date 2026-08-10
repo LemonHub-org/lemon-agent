@@ -301,6 +301,7 @@ mod tests {
         }
     }
     #[test]
+    #[serial_test::serial]
     fn explicit_missing_config_errors() {
         let dir = tempdir().unwrap();
         let config = Config::load(&dir.path().join("config.toml")).unwrap_err();
@@ -308,6 +309,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     #[serial_test::serial]
     fn default_config_loads_without_file() {
         let original = env::var("AGENT_API_KEY").ok();
@@ -323,6 +325,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn parses_valid_config_file() {
         let dir = tempdir().unwrap();
         let path = write_config(
@@ -348,6 +351,7 @@ allowed_commands = ["git", "cargo"]
     }
 
     #[test]
+    #[serial_test::serial]
     fn rejects_invalid_config_with_all_problems() {
         let dir = tempdir().unwrap();
         let path = write_config(
@@ -391,6 +395,7 @@ level = "verbose"
     }
 
     #[test]
+    #[serial_test::serial]
     fn rejects_invalid_executable_names() {
         let dir = tempdir().unwrap();
         let path = write_config(
@@ -410,6 +415,7 @@ allowed_commands = ["git", "rm -rf", "/usr/bin/cargo"]
     }
 
     #[test]
+    #[serial_test::serial]
     #[serial_test::serial]
     fn env_overrides_apply() {
         let original = [
