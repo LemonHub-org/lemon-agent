@@ -1,0 +1,6 @@
+/target
+/workspace
+/agent.db
+*.db
+/agent.log
+*.log
