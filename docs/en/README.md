@@ -2,10 +2,10 @@
 
 Lemon Agent is an unattended, long-running autonomous programming agent built
 in Rust. It accepts a programming goal and continuously plans, modifies code,
-runs commands, tests, debugs, and evaluates results — and improves its own
+runs commands, tests, debugs, and evaluates results �?and improves its own
 Rhai execution scripts within a safe boundary.
 
-> **Status: v1.0 implemented.** The full single-machine loop is working:
+> **Status: v0.1.0 released.** The full single-machine loop is working:
 > planning, script-driven execution, verification, event-sourced persistence
 > with crash recovery, hot-reloadable Rhai strategies, and validated
 > self-evolution with rollback. See [ROADMAP.md](./ROADMAP.md) for the phase
@@ -53,7 +53,7 @@ During the run, the agent will:
 ## Core capabilities
 
 - **Autonomous task loop**: drives tasks through the
-  `Planning → Executing → Evaluating → Evolving` state machine.
+  `Planning �?Executing �?Evaluating �?Evolving` state machine.
 - **Code operations**: safely read, write, append, list, and search files in
   the working directory.
 - **Commands and tests**: run whitelisted non-interactive commands such as
@@ -80,18 +80,10 @@ During the run, the agent will:
 
 ```text
 Task input / external API
-        │
-        ▼
-Rust scheduler ── state machine, context, budget, recovery
-        │
-        ▼
-Capability & sandbox layer ── capability tokens, path confinement, command whitelist, audit
-        │
-        ▼
-Rhai script engine ── hot-reloadable execution strategy
-        │
-        ▼
-Evolution engine ── failure analysis, candidate generation, validation & rollback
+        �?        �?Rust scheduler ── state machine, context, budget, recovery
+        �?        �?Capability & sandbox layer ── capability tokens, path confinement, command whitelist, audit
+        �?        �?Rhai script engine ── hot-reloadable execution strategy
+        �?        �?Evolution engine ── failure analysis, candidate generation, validation & rollback
 
 The SQLite event store runs through every layer, holding events and snapshots.
 ```
@@ -131,34 +123,34 @@ Lemon Agent keeps an immutable event log and periodic state snapshots in
 - continue from a safe step boundary.
 
 Structured logs expose current state, steps, tool calls, resource usage, and
-final results — no GUI or interactive terminal required.
+final results �?no GUI or interactive terminal required.
 
 ## Project layout
 
 ```text
 .
 ├── src/
-│   ├── kernel/
-│   │   ├── capability.rs
-│   │   ├── event_store.rs
-│   │   └── sandbox.rs
-│   ├── scheduler/
-│   │   ├── budget.rs
-│   │   ├── context.rs
-│   │   ├── loop_runner.rs
-│   │   ├── mod.rs
-│   │   └── plan.rs
-│   ├── llm/
-│   │   └── client.rs
-│   ├── evolution/
-│   │   ├── mod.rs
-│   │   └── script_engine.rs
-│   └── main.rs
+�?  ├── kernel/
+�?  �?  ├── capability.rs
+�?  �?  ├── event_store.rs
+�?  �?  └── sandbox.rs
+�?  ├── scheduler/
+�?  �?  ├── budget.rs
+�?  �?  ├── context.rs
+�?  �?  ├── loop_runner.rs
+�?  �?  ├── mod.rs
+�?  �?  └── plan.rs
+�?  ├── llm/
+�?  �?  └── client.rs
+�?  ├── evolution/
+�?  �?  ├── mod.rs
+�?  �?  └── script_engine.rs
+�?  └── main.rs
 ├── scripts/
-│   └── plan_and_execute.rhai
+�?  └── plan_and_execute.rhai
 ├── docs/
-│   ├── en/          # English documentation
-│   └── zh-CN/       # Chinese documentation
+�?  ├── en/          # English documentation
+�?  └── zh-CN/       # Chinese documentation
 ├── deploy/          # systemd and Docker Compose examples
 ├── Dockerfile
 ├── config.toml
@@ -200,7 +192,7 @@ file = "agent.log"
 The LLM key is provided through the `AGENT_API_KEY` environment variable to
 keep it out of the committed configuration file.
 
-## v1.0 completion criteria
+## v0.1.0 completion criteria
 
 The first stable release:
 
@@ -215,7 +207,7 @@ The first stable release:
 - passes a security review, fault-injection tests, and at least 24 hours of
   stability testing.
 
-> v1.0 acceptance status: all project gates (fmt / clippy / test) pass;
+> v0.1.0 acceptance status: all project gates (fmt / clippy / test) pass;
 > sandbox end-to-end tasks, crash recovery, budget boundaries, script hot
 > reload, evolution fixes and rollback, and stability cycle tests are
 > automated. The 24-hour soak test ships as an `#[ignore]` test
@@ -223,7 +215,7 @@ The first stable release:
 
 ## Explicit non-goals
 
-v1.0 does not provide:
+v0.1.0 does not provide:
 
 - a graphical interface or interactive terminal,
 - distributed clusters or parallel multi-agent scheduling,

@@ -1,6 +1,6 @@
-# SPECS – Lemon Agent Technical Specification
+# SPECS �?Lemon Agent Technical Specification
 
-> **Version**: 1.0
+> **Version**: 0.1.0
 > **Goal**: Build an AI agent written from scratch in Rust that supports
 > unattended long-running autonomous programming and self-evolution.
 > **Core principles**: minimal dependencies, high performance, safe isolation,
@@ -15,8 +15,8 @@
 Create a long-running daemon that can:
 
 - Accept programming tasks (through an initial instruction or an external interface)
-- Continuously perform programming activities — writing, testing, debugging,
-  refactoring — without human intervention
+- Continuously perform programming activities �?writing, testing, debugging,
+  refactoring �?without human intervention
 - Autonomously improve its own behavior logic based on execution feedback (evolution)
 - Provide complete audit logs and recovery capabilities
 
@@ -39,42 +39,11 @@ Create a long-running daemon that can:
 ### 2.1 Layered Model
 
 ```
-┌─────────────────────────────────────────┐
-│      External trigger (initial task/API) │
-└─────────────────┬───────────────────────┘
-                  ▼
-┌─────────────────────────────────────────┐
-│          Scheduler                      │  ← Rust core, immutable
-│  - main loop (while-true)               │
-│  - state machine (IDLE, PLANNING,       │
-│    EXECUTING, EVALUATING, EVOLVING)     │
-│  - context management (sliding window)  │
-│  - budget control (steps/tokens/calls)  │
-└──────────────┬──────────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────────┐
-│          Capability Layer               │  ← Rust core, security boundary
-│  - capability tokens                    │
-│  - sandbox executor                     │
-│  - tools (fs, process, git)             │
-└──────────────┬──────────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────────┐
-│          Script Engine                  │  ← Rhai runtime, evolvable
-│  - dynamically loads scripts/*.rhai     │
-│  - exposes Rust tools as Rhai functions │
-│  - hot reload                           │
-└──────────────┬──────────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────────┐
-│         Evolution Engine                │  ← partly script, partly Rust
-│  - error capture → improved script      │
-│  - script replacement and validation    │
-└─────────────────────────────────────────┘
-```
+┌─────────────────────────────────────────�?�?     External trigger (initial task/API) �?└─────────────────┬───────────────────────�?                  �?┌─────────────────────────────────────────�?�?         Scheduler                      �? �?Rust core, immutable
+�? - main loop (while-true)               �?�? - state machine (IDLE, PLANNING,       �?�?   EXECUTING, EVALUATING, EVOLVING)     �?�? - context management (sliding window)  �?�? - budget control (steps/tokens/calls)  �?└──────────────┬──────────────────────────�?               �?               �?┌─────────────────────────────────────────�?�?         Capability Layer               �? �?Rust core, security boundary
+�? - capability tokens                    �?�? - sandbox executor                     �?�? - tools (fs, process, git)             �?└──────────────┬──────────────────────────�?               �?               �?┌─────────────────────────────────────────�?�?         Script Engine                  �? �?Rhai runtime, evolvable
+�? - dynamically loads scripts/*.rhai     �?�? - exposes Rust tools as Rhai functions �?�? - hot reload                           �?└──────────────┬──────────────────────────�?               �?               �?┌─────────────────────────────────────────�?�?        Evolution Engine                �? �?partly script, partly Rust
+�? - error capture �?improved script      �?�? - script replacement and validation    �?└─────────────────────────────────────────�?```
 
 ### 2.2 Data Storage
 - **SQLite**: a single database file `agent.db`, used for event sourcing and
@@ -393,7 +362,7 @@ A typical task execution:
 4. **Evaluating**: after the plan completes, runs the verification (such as a
    test suite). On failure, evolution is triggered.
 5. **Evolving**: if validation fails, the evolution flow modifies the relevant
-   script, then steps 3–4 repeat.
+   script, then steps 3�? repeat.
 6. **Termination**: when validation passes or the budget is exhausted, a
    final report is generated, a snapshot is saved, and the agent enters
    `Idle` waiting for a new task.

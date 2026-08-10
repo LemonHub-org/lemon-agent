@@ -115,7 +115,7 @@
   - Completion criteria: passes a security review and 24-hour stability
     testing; no event loss or privilege escalation after faults.
 
-- **Phase 8: Packaging, deployment, and v1.0 release**
+- **Phase 8: Packaging, deployment, and v0.1.0 release**
   - Complete release-mode builds, configuration documentation, the running
     manual, and audit and recovery guides.
   - Provide a multi-stage Dockerfile packaging the binary, default scripts,
@@ -129,7 +129,7 @@
     documentation and passes end-to-end task, crash recovery, and log audit
     acceptance.
 
-- **Post-v1.0 roadmap**
+- **Post-v0.1.0 roadmap**
   - Introduce multi-project workspace isolation and finer-grained capability
     tokens.
   - Use Tokio multi-threading for budget-constrained parallel subtasks;
