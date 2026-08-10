@@ -1,7 +1,7 @@
 # Error Codes and Recovery Strategy
 
 Every failure surfaced by the agent carries a stable code. The recovery
-strategy below mirrors SPECS.txt Appendix C and is enforced by the scheduler,
+strategy below mirrors SPECS.md Appendix C and is enforced by the scheduler,
 sandbox, and LLM gateway.
 
 | Code | Class | Meaning | Recovery strategy |

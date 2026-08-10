@@ -6,7 +6,7 @@ shows how to audit a run and how to recover after a crash.
 
 ## Audit
 
-The schema is stable and documented in `SPECS.txt`. Useful queries with the
+The schema is stable and documented in `SPECS.md`. Useful queries with the
 `sqlite3` CLI:
 
 ```sql
@@ -51,7 +51,7 @@ Two special cases:
 - **Crash before the first snapshot**: the task restarts from the
   `ContinuityStarted` event's initial prompt.
 - **Corrupt or newer database**: the agent refuses to open it and exits with
-  a clear error (see `docs/migrations.md`). It never silently continues from
+  a clear error (see `migrations.md`). It never silently continues from
   inconsistent state.
 
 ## Guarantees

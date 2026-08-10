@@ -23,7 +23,7 @@ Adding a migration:
 ## Script interface
 
 The strategy script contract is the `execute_plan(plan)` entry point plus the
-tool names documented in `SPECS.txt`:
+tool names documented in `SPECS.md`:
 
 - Scripts must export `fn execute_plan(plan)`; the engine refuses to load
   anything else.
