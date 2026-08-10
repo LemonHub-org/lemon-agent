@@ -6,12 +6,14 @@ use std::process::ExitCode;
 use clap::Parser;
 use lemon_agent::cli::Cli;
 use lemon_agent::config::Config;
-use lemon_agent::error::{Error, Result};
+use lemon_agent::error::Result;
+use lemon_agent::scheduler::Agent;
 use tracing::{error, info};
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli) {
+    match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             error!(error = %e, code = %e.code(), "agent terminated");
@@ -21,7 +23,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
+async fn run(cli: Cli) -> Result<()> {
     let mut config = Config::load(&cli.config)?;
     config.apply_cli_overrides(&cli);
     config.validate()?;
@@ -38,12 +40,19 @@ fn run(cli: Cli) -> Result<()> {
         "agent initialized"
     );
 
-    if let Some(task) = &cli.task {
-        info!(task_preview = %preview(task, 200), "task received");
-    } else {
-        info!("no task provided; agent remains in idle state");
-    }
-
+    let mut agent = Agent::new(&config, cli.task)?;
+    let report = agent.run().await?;
+    info!(
+        continuity_id = %report.continuity_id,
+        status = %report.status,
+        steps = report.steps_used,
+        summary = %report.summary,
+        "continuity finished"
+    );
+    println!(
+        "status: {}\ncontinuity: {}\nsteps: {}\nsummary: {}",
+        report.status, report.continuity_id, report.steps_used, report.summary
+    );
     Ok(())
 }
 
@@ -51,20 +60,10 @@ fn run(cli: Cli) -> Result<()> {
 fn ensure_dirs(config: &Config) -> Result<()> {
     for path in [&config.agent.work_dir, &config.agent.scripts_dir] {
         if !path.exists() {
-            std::fs::create_dir_all(path).map_err(|e| Error::io(Some(path.clone()), e))?;
+            std::fs::create_dir_all(path)
+                .map_err(|e| lemon_agent::error::Error::io(Some(path.clone()), e))?;
             info!(path = %path.display(), "created directory");
         }
     }
     Ok(())
-}
-
-/// Truncate a string for safe logging without leaking secrets.
-fn preview(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max_chars).collect();
-        out.push_str("...");
-        out
-    }
 }

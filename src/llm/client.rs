@@ -532,10 +532,10 @@ fn apply_chunk(
     model: &mut String,
     usage: &mut Usage,
 ) {
-    if let Some(m) = chunk.get("model").and_then(Value::as_str) {
-        if model.is_empty() {
-            *model = m.to_string();
-        }
+    if let Some(m) = chunk.get("model").and_then(Value::as_str)
+        && model.is_empty()
+    {
+        *model = m.to_string();
     }
     if let Some(u) = chunk.get("usage") {
         if let Some(t) = u.get("total_tokens").and_then(Value::as_u64) {

@@ -31,13 +31,26 @@ impl Context {
         }
     }
 
+    /// Rebuild a context from persisted messages, preserving the window
+    /// settings that created it.
+    pub fn from_messages(messages: Vec<Message>, max_tokens: usize, keep_recent: usize) -> Context {
+        Context {
+            messages,
+            max_tokens,
+            keep_recent: keep_recent.max(1),
+        }
+    }
+
     /// Append a message, truncating oversized tool results.
     pub fn push(&mut self, message: Message) {
         self.messages.push(message);
     }
 
-    /// Append a tool result, truncated to `max_chars` to bound the context.
-    pub fn push_tool_result(&mut self, tool_call_id: &str, content: &str, max_chars: usize) {
+    /// Append a tool result as a user message, truncated to `max_chars` to
+    /// bound the context. The plan-execution model has no assistant tool
+    /// calls, so results are labeled user messages rather than `tool` role
+    /// messages (which some APIs reject without a matching tool call).
+    pub fn push_tool_result(&mut self, tool_name: &str, content: &str, max_chars: usize) {
         let truncated = if content.chars().count() > max_chars {
             let mut out: String = content.chars().take(max_chars).collect();
             out.push_str("\n... [truncated]");
@@ -45,8 +58,9 @@ impl Context {
         } else {
             content.to_string()
         };
-        self.messages
-            .push(Message::tool_result(tool_call_id, truncated));
+        self.messages.push(Message::user(format!(
+            "[tool {tool_name} result]\n{truncated}"
+        )));
     }
 
     /// All messages in order.
@@ -159,10 +173,10 @@ mod tests {
     #[test]
     fn tool_results_are_truncated() {
         let mut ctx = Context::new(1_000_000, 2);
-        ctx.push_tool_result("t1", &"y".repeat(1000), 50);
+        ctx.push_tool_result("read_file", &"y".repeat(1000), 50);
         let content = &ctx.messages()[0].content;
         assert!(content.contains("[truncated]"));
         assert!(content.chars().count() < 100);
-        assert_eq!(ctx.messages()[0].tool_call_id.as_deref(), Some("t1"));
+        assert!(content.starts_with("[tool read_file result]"));
     }
 }
