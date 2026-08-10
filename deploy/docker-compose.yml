@@ -1,0 +1,17 @@
+services:
+  lemon-agent:
+    build: ..
+    image: lemon-agent:latest
+    restart: unless-stopped
+    environment:
+      AGENT_API_KEY: "${AGENT_API_KEY:?set AGENT_API_KEY in .env}"
+    volumes:
+      - lemon-data:/opt/lemon-agent
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  lemon-data:

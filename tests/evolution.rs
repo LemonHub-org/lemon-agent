@@ -43,8 +43,10 @@ fn fixture(server_url: &str) -> Fixture {
     let workspace = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
 
-    let mut cfg = lemon_agent::config::LlmConfig::default();
-    cfg.base_url = server_url.to_string();
+    let mut cfg = lemon_agent::config::LlmConfig {
+        base_url: server_url.to_string(),
+        ..Default::default()
+    };
     cfg.model = "mock".to_string();
     cfg.max_retries = 0;
     let llm = Arc::new(lemon_agent::llm::LLMClient::new(&cfg).unwrap());

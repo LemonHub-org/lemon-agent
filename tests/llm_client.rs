@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use lemon_agent::config::LlmConfig;
-use lemon_agent::error::{Error, ErrorCode};
-use lemon_agent::llm::{LLMClient, Message, Role, ToolDefinition};
+use lemon_agent::error::ErrorCode;
+use lemon_agent::llm::{LLMClient, Message, ToolDefinition};
 use serde_json::json;
 
 fn config(base_url: &str) -> LlmConfig {

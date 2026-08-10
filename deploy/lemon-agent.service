@@ -1,0 +1,26 @@
+[Unit]
+Description=Lemon Agent - unattended autonomous programming agent
+Documentation=https://github.com/LemonHub-org/lemon-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lemon
+Group=lemon
+WorkingDirectory=/opt/lemon-agent
+ExecStart=/opt/lemon-agent/lemon-agent --config /opt/lemon-agent/config.toml
+Restart=on-failure
+RestartSec=10
+# API key and other secrets live here, outside the repository:
+EnvironmentFile=-/etc/lemon-agent.env
+# Hard limits keep one runaway agent from starving the host.
+LimitNOFILE=4096
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/lemon-agent
+
+[Install]
+WantedBy=multi-user.target

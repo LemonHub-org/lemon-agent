@@ -2,7 +2,33 @@
 
 Lemon Agent 是一个使用 Rust 构建的、可长期无人值守运行的自主编程 Agent。项目完成后，它将能够接收一个编程目标，持续完成规划、代码修改、命令执行、测试、调试和结果评估，并在安全边界内改进自己的 Rhai 执行脚本。
 
-> 当前仓库处于规划阶段。本文描述的是项目完成后的目标形态；具体实施顺序见 [ROADMAP.md](./ROADMAP.md)。
+> **Status: v1.0 implemented.** The full Replay-free single-machine loop is
+> working: planning, script-driven execution, verification, event-sourced
+> persistence with crash recovery, hot-reloadable Rhai strategies, and
+> validated self-evolution with rollback. See [ROADMAP.md](./ROADMAP.md) for
+> the phase record and [docs/running.md](./docs/running.md) to deploy.
+
+## Quick start
+
+```bash
+cargo build --release
+export AGENT_API_KEY="sk-..."
+./target/release/lemon-agent --config config.toml --task "implement fibonacci and test it"
+# prints: status: completed / continuity: <id> / steps: N / summary: ...
+```
+
+Docker (`docker build -t lemon-agent .`) and systemd
+(`deploy/lemon-agent.service`) deployments are provided. Details in
+[docs/running.md](docs/running.md).
+
+## Documentation
+
+- [Technical specification](./SPECS.txt)
+- [Project roadmap](./ROADMAP.md)
+- [Running guide](./docs/running.md)
+- [Audit and recovery](./docs/audit-and-recovery.md)
+- [Error codes](./docs/error-codes.md)
+- [Versioning and migrations](./docs/migrations.md)
 
 ## 完成后的 Lemon Agent
 
@@ -158,6 +184,11 @@ LLM 密钥将优先通过 `AGENT_API_KEY` 等环境变量提供，避免直接�
 - 热重载 Rhai 策略脚本，并可靠验证或回滚自主改进。
 - 通过安全审查、故障注入测试和至少 24 小时稳定性测试。
 
+> v1.0 验收状态：全部项目结构与 CI 门禁（fmt / clippy / test）通过；沙箱
+> 端到端任务、崩溃恢复、预算边界、脚本热重载、进化修复与回滚、稳定性
+> 周期测试均已有自动化覆盖。24 小时浸泡测试作为 `#[ignore]` 测试提供
+> （`cargo test --test stability -- --ignored`）。
+
 ## 明确的非目标
 
 v1.0 不计划提供：
@@ -174,3 +205,7 @@ v1.0 不计划提供：
 
 - [技术规格](./SPECS.txt)
 - [项目路线图](./ROADMAP.md)
+- [运行手册](./docs/running.md)
+- [审计与恢复](./docs/audit-and-recovery.md)
+- [错误码与恢复策略](./docs/error-codes.md)
+- [版本迁移策略](./docs/migrations.md)

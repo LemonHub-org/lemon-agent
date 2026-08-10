@@ -137,11 +137,10 @@ impl EventStore {
                 .map_err(|e| Error::io(Some(parent.to_path_buf()), e))?;
         }
         let conn = Connection::open(path).map_err(Error::Database)?;
+        migrate(&conn)?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(Error::Database)?;
         conn.pragma_update(None, "busy_timeout", 5000)
-            .map_err(Error::Database)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(Error::Database)?;
         conn.execute_batch(SCHEMA).map_err(Error::Database)?;
         Ok(EventStore {
@@ -435,6 +434,34 @@ CREATE TABLE IF NOT EXISTS snapshots (
     timestamp INTEGER NOT NULL
 );
 "#;
+
+/// Migrate a database to the current schema version.
+///
+/// Databases from a newer binary are refused: downgrading would silently
+/// discard data the binary cannot interpret. Older versions are upgraded by
+/// running every migration in order; the idempotent `SCHEMA` batch is safe to
+/// apply repeatedly.
+fn migrate(conn: &Connection) -> Result<()> {
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(Error::Database)?;
+    if version > SCHEMA_VERSION {
+        return Err(Error::Internal(format!(
+            "database schema version {version} is newer than this binary supports ({SCHEMA_VERSION}); refusing to open"
+        )));
+    }
+    if version < SCHEMA_VERSION {
+        tracing::info!(
+            from = version,
+            to = SCHEMA_VERSION,
+            "migrating event store schema"
+        );
+        conn.execute_batch(SCHEMA).map_err(Error::Database)?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(Error::Database)?;
+    }
+    Ok(())
+}
 
 /// Current wall-clock time in Unix milliseconds.
 pub fn now_ms() -> u64 {
@@ -750,6 +777,34 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         let err = EventStore::open(&sub).unwrap_err();
         assert_eq!(err.code(), ErrorCode::Database);
+    }
+
+    #[test]
+    fn newer_schema_version_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(conn);
+        let err = EventStore::open(&path).unwrap_err();
+        assert!(err.to_string().contains("newer"), "{err}");
+        assert_eq!(err.code(), ErrorCode::Internal);
+    }
+
+    #[test]
+    fn older_schema_version_is_upgraded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 0).unwrap();
+        drop(conn);
+        let store = EventStore::open(&path).unwrap();
+        assert_eq!(EventStore::schema_version(&path).unwrap(), SCHEMA_VERSION);
+        store
+            .append("c1", &EventType::StepStarted { step_num: 1 })
+            .unwrap();
+        assert_eq!(store.events_after("c1", 0).unwrap().len(), 1);
     }
 
     use crate::error::ErrorCode;

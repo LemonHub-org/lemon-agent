@@ -139,7 +139,7 @@ async fn twenty_four_hour_soak() {
     while std::time::Instant::now() < deadline {
         run_cycle(&server, cycle).await;
         cycle += 1;
-        if cycle % 100 == 0 {
+        if cycle.is_multiple_of(100) {
             eprintln!("soak: {cycle} cycles completed");
         }
     }
