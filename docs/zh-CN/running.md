@@ -31,6 +31,7 @@ cargo test --all-targets --all-features
 
 | 设置项 | 环境变量覆盖 | CLI 参数 |
 |---------|------------------|----------|
+| `llm.provider` | `AGENT_LLM_PROVIDER` | `--llm-provider` |
 | `llm.api_key` | `AGENT_API_KEY` | `--api-key` |
 | `llm.base_url` | `AGENT_LLM_BASE_URL` | `--llm-base-url` |
 | `llm.model` | `AGENT_MODEL` | `--model` |
@@ -49,6 +50,7 @@ work_dir = "./workspace"
 scripts_dir = "./scripts"
 
 [llm]
+provider = "openai"          # openai | anthropic | gemini | custom
 api_key = ""                 # 使用 AGENT_API_KEY
 base_url = "https://api.openai.com/v1"
 model = "gpt-4"
@@ -56,6 +58,45 @@ model = "gpt-4"
 [sandbox]
 root_dir = "./workspace"
 allowed_commands = ["git", "cargo", "rustc", "python3", "ls"]
+```
+
+## LLM 提供商
+
+LLM 网关通过可插拔适配器支持四种提供商：
+
+| 提供商 | 协议 | 说明 |
+|----------|----------|-------|
+| `openai`（默认） | OpenAI chat completions | 通过 `base_url` 同样覆盖 DeepSeek、Ollama、vLLM 及任意 OpenAI 兼容端点。 |
+| `anthropic` | Messages API | 使用 `x-api-key` + `anthropic-version` 请求头；`max_output_tokens` 为必填并会发送。 |
+| `gemini` | GenerateContent | 使用 `x-goog-api-key`；模型名嵌入请求路径。 |
+| `custom` | 可自定义的 OpenAI 兼容端点 | 用于自建网关、代理和 LLM 聚合器。 |
+
+所有提供商都支持流式响应、工具调用、退避重试和超时。规范化后的消息与
+工具模型在所有提供商之间完全一致。
+
+示例：通过 Anthropic 使用 Claude
+
+```toml
+[llm]
+provider = "anthropic"
+base_url = "https://api.anthropic.com"
+model = "claude-3-5-sonnet-20241022"
+max_output_tokens = 8192
+```
+
+示例：自定义 OpenAI 兼容网关（如 OneAPI 风格的代理）
+
+```toml
+[llm]
+provider = "custom"
+base_url = "https://gateway.example.com"
+model = "deepseek-chat"
+
+[llm.custom]
+chat_path = "/v1/chat/completions"
+api_key_header = "X-Api-Key"
+api_key_scheme = ""
+headers = { "X-Tenant" = "team-a" }
 ```
 
 ## 运行

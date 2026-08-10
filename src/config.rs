@@ -60,6 +60,9 @@ impl Config {
         if let Ok(v) = env::var("AGENT_MODEL") {
             self.llm.model = v;
         }
+        if let Ok(v) = env::var("AGENT_LLM_PROVIDER") {
+            self.llm.provider = v;
+        }
         if let Ok(v) = env::var("AGENT_WORK_DIR") {
             self.agent.work_dir = PathBuf::from(v);
         }
@@ -84,6 +87,9 @@ impl Config {
         }
         if let Some(v) = &cli.model {
             self.llm.model = v.clone();
+        }
+        if let Some(v) = &cli.llm_provider {
+            self.llm.provider = v.clone();
         }
         if let Some(v) = &cli.work_dir {
             self.agent.work_dir = v.clone();
@@ -128,11 +134,25 @@ impl Config {
         if self.llm.model.trim().is_empty() {
             problems.push("llm.model must be set (or AGENT_MODEL)".to_string());
         }
+        if !["openai", "anthropic", "gemini", "custom"].contains(&self.llm.provider.as_str()) {
+            problems.push(format!(
+                "llm.provider must be one of openai|anthropic|gemini|custom, got {:?}",
+                self.llm.provider
+            ));
+        }
+        if self.llm.max_output_tokens == 0 {
+            problems.push("llm.max_output_tokens must be > 0".to_string());
+        }
         if !(0.0..=2.0).contains(&self.llm.temperature) {
             problems.push("llm.temperature must be in [0.0, 2.0]".to_string());
         }
         if self.llm.max_retries > 10 {
             problems.push("llm.max_retries must be <= 10".to_string());
+        }
+        if self.llm.provider == "custom"
+            && let Err(e) = crate::llm::provider::validate_custom(&self.llm.custom)
+        {
+            problems.push(e.to_string());
         }
 
         if self.sandbox.root_dir.as_os_str().is_empty() {
@@ -207,29 +227,63 @@ impl Default for AgentConfig {
     }
 }
 
-/// OpenAI-compatible LLM gateway settings.
+/// LLM gateway settings with pluggable providers.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct LlmConfig {
+    /// "openai" (default), "anthropic", "gemini", or "custom".
+    pub provider: String,
     pub api_key: String,
     pub base_url: String,
     pub model: String,
-    pub temperature: f32,
+    pub temperature: f64,
+    /// Cap on generated tokens; required by providers such as Anthropic.
+    pub max_output_tokens: u64,
     pub request_timeout_secs: u64,
     pub max_retries: u32,
     pub retry_base_delay_secs: u64,
+    /// Endpoint details for `provider = "custom"`.
+    pub custom: CustomLlmConfig,
 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
         LlmConfig {
+            provider: "openai".to_string(),
             api_key: String::new(),
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4".to_string(),
             temperature: 0.7,
+            max_output_tokens: 4096,
             request_timeout_secs: 60,
             max_retries: 3,
             retry_base_delay_secs: 1,
+            custom: CustomLlmConfig::default(),
+        }
+    }
+}
+
+/// Definition of a custom OpenAI-compatible endpoint.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CustomLlmConfig {
+    /// URL path relative to `llm.base_url`, e.g. "/v1/chat/completions".
+    pub chat_path: String,
+    /// Header carrying the API key, e.g. "Authorization" or "X-Api-Key".
+    pub api_key_header: String,
+    /// Prefix prepended to the key value, e.g. "Bearer ".
+    pub api_key_scheme: String,
+    /// Extra static headers sent with every request.
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for CustomLlmConfig {
+    fn default() -> Self {
+        CustomLlmConfig {
+            chat_path: "/chat/completions".to_string(),
+            api_key_header: "Authorization".to_string(),
+            api_key_scheme: "Bearer ".to_string(),
+            headers: std::collections::BTreeMap::new(),
         }
     }
 }

@@ -1,4 +1,4 @@
-# SPECS �?Lemon Agent Technical Specification
+# SPECS �?Lemon Agent Technical Specification
 
 > **Version**: 0.1.0
 > **Goal**: Build an AI agent written from scratch in Rust that supports
@@ -15,8 +15,8 @@
 Create a long-running daemon that can:
 
 - Accept programming tasks (through an initial instruction or an external interface)
-- Continuously perform programming activities �?writing, testing, debugging,
-  refactoring �?without human intervention
+- Continuously perform programming activities �?writing, testing, debugging,
+  refactoring �?without human intervention
 - Autonomously improve its own behavior logic based on execution feedback (evolution)
 - Provide complete audit logs and recovery capabilities
 
@@ -39,11 +39,11 @@ Create a long-running daemon that can:
 ### 2.1 Layered Model
 
 ```
-┌─────────────────────────────────────────�?�?     External trigger (initial task/API) �?└─────────────────┬───────────────────────�?                  �?┌─────────────────────────────────────────�?�?         Scheduler                      �? �?Rust core, immutable
-�? - main loop (while-true)               �?�? - state machine (IDLE, PLANNING,       �?�?   EXECUTING, EVALUATING, EVOLVING)     �?�? - context management (sliding window)  �?�? - budget control (steps/tokens/calls)  �?└──────────────┬──────────────────────────�?               �?               �?┌─────────────────────────────────────────�?�?         Capability Layer               �? �?Rust core, security boundary
-�? - capability tokens                    �?�? - sandbox executor                     �?�? - tools (fs, process, git)             �?└──────────────┬──────────────────────────�?               �?               �?┌─────────────────────────────────────────�?�?         Script Engine                  �? �?Rhai runtime, evolvable
-�? - dynamically loads scripts/*.rhai     �?�? - exposes Rust tools as Rhai functions �?�? - hot reload                           �?└──────────────┬──────────────────────────�?               �?               �?┌─────────────────────────────────────────�?�?        Evolution Engine                �? �?partly script, partly Rust
-�? - error capture �?improved script      �?�? - script replacement and validation    �?└─────────────────────────────────────────�?```
+┌─────────────────────────────────────────�?�?     External trigger (initial task/API) �?└─────────────────┬───────────────────────�?                  �?┌─────────────────────────────────────────�?�?         Scheduler                      �? �?Rust core, immutable
+�? - main loop (while-true)               �?�? - state machine (IDLE, PLANNING,       �?�?   EXECUTING, EVALUATING, EVOLVING)     �?�? - context management (sliding window)  �?�? - budget control (steps/tokens/calls)  �?└──────────────┬──────────────────────────�?               �?               �?┌─────────────────────────────────────────�?�?         Capability Layer               �? �?Rust core, security boundary
+�? - capability tokens                    �?�? - sandbox executor                     �?�? - tools (fs, process, git)             �?└──────────────┬──────────────────────────�?               �?               �?┌─────────────────────────────────────────�?�?         Script Engine                  �? �?Rhai runtime, evolvable
+�? - dynamically loads scripts/*.rhai     �?�? - exposes Rust tools as Rhai functions �?�? - hot reload                           �?└──────────────┬──────────────────────────�?               �?               �?┌─────────────────────────────────────────�?�?        Evolution Engine                �? �?partly script, partly Rust
+�? - error capture �?improved script      �?�? - script replacement and validation    �?└─────────────────────────────────────────�?```
 
 ### 2.2 Data Storage
 - **SQLite**: a single database file `agent.db`, used for event sourcing and
@@ -229,13 +229,20 @@ All operations are recorded in the audit log (through the `ToolCall` event).
 
 ### 3.6 LLM Gateway
 
-**File**: `src/llm/client.rs`
+**Files**: `src/llm/client.rs`, `src/llm/provider.rs`
 
-Wraps HTTP requests and supports OpenAI-compatible APIs (e.g. DeepSeek, GPT-4).
+Wraps HTTP requests and supports multiple providers through a pluggable
+adapter: `openai` (OpenAI-compatible chat completions; also covers DeepSeek,
+Ollama, vLLM, and any compatible gateway via `base_url`), `anthropic`
+(Messages API), `gemini` (GenerateContent), and `custom` (an OpenAI-compatible
+endpoint with configurable path, auth header, and extra headers).
 
 - Uses the `reqwest` async client with retry (exponential backoff, at most 3 times).
 - Supports streaming responses (optional) for real-time output.
-- Supports Function Calling: converts Rust tools into JSON Schema.
+- Supports Function Calling: converts Rust tools into each provider's schema.
+- Providers own their wire formats; messages, tools, and responses are
+  normalized to a single provider-agnostic model, so the scheduler, scripts,
+  and evolution engine are provider-independent.
 
 ```rust
 pub struct LLMClient {
@@ -243,17 +250,16 @@ pub struct LLMClient {
     base_url: String,
     model: String,
     client: reqwest::Client,
+    provider: Box<dyn LlmProvider>,
 }
 
-impl LLMClient {
-    pub async fn chat(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        temperature: f32,
-    ) -> Result<LLMResponse> {
-        // ...
-    }
+pub trait LlmProvider: Debug + Send + Sync {
+    fn chat_path(&self, model: &str, stream: bool) -> String;
+    fn auth_headers(&self, api_key: &str) -> Vec<(String, String)>;
+    fn build_body(&self, model: &str, max_output_tokens: u64, messages: &[Message],
+                  tools: &[ToolDefinition], temperature: f64, stream: bool) -> Result<Value>;
+    fn parse_completion(&self, body: &Value, model: &str) -> Result<LLMResponse>;
+    fn stream_parser(&self) -> Box<dyn StreamParser>;
 }
 ```
 
@@ -362,7 +368,7 @@ A typical task execution:
 4. **Evaluating**: after the plan completes, runs the verification (such as a
    test suite). On failure, evolution is triggered.
 5. **Evolving**: if validation fails, the evolution flow modifies the relevant
-   script, then steps 3�? repeat.
+   script, then steps 3�? repeat.
 6. **Termination**: when validation passes or the budget is exhausted, a
    final report is generated, a snapshot is saved, and the agent enters
    `Idle` waiting for a new task.
@@ -444,10 +450,12 @@ heartbeat_interval_secs = 60
 snapshot_interval_steps = 10
 
 [llm]
+provider = "openai"
 api_key = "your-api-key"
 base_url = "https://api.openai.com/v1"
 model = "gpt-4"
 temperature = 0.7
+max_output_tokens = 4096
 
 [sandbox]
 root_dir = "./workspace"

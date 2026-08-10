@@ -36,4 +36,9 @@ pub struct Cli {
     /// Override the LLM model name (also via AGENT_MODEL).
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
+
+    /// Override the LLM provider: openai|anthropic|gemini|custom (also via
+    /// AGENT_LLM_PROVIDER).
+    #[arg(long, value_name = "PROVIDER")]
+    pub llm_provider: Option<String>,
 }

@@ -33,6 +33,7 @@ file:
 
 | Setting | Env var override | CLI flag |
 |---------|------------------|----------|
+| `llm.provider` | `AGENT_LLM_PROVIDER` | `--llm-provider` |
 | `llm.api_key` | `AGENT_API_KEY` | `--api-key` |
 | `llm.base_url` | `AGENT_LLM_BASE_URL` | `--llm-base-url` |
 | `llm.model` | `AGENT_MODEL` | `--model` |
@@ -51,6 +52,7 @@ work_dir = "./workspace"
 scripts_dir = "./scripts"
 
 [llm]
+provider = "openai"          # openai | anthropic | gemini | custom
 api_key = ""                 # use AGENT_API_KEY
 base_url = "https://api.openai.com/v1"
 model = "gpt-4"
@@ -58,6 +60,45 @@ model = "gpt-4"
 [sandbox]
 root_dir = "./workspace"
 allowed_commands = ["git", "cargo", "rustc", "python3", "ls"]
+```
+
+## LLM providers
+
+The LLM gateway supports four providers through a pluggable adapter:
+
+| Provider | Protocol | Notes |
+|----------|----------|-------|
+| `openai` (default) | OpenAI chat completions | Also covers DeepSeek, Ollama, vLLM, and any OpenAI-compatible endpoint via `base_url`. |
+| `anthropic` | Messages API | Uses `x-api-key` + `anthropic-version` headers; `max_output_tokens` is required and sent. |
+| `gemini` | GenerateContent | Uses `x-goog-api-key`; the model is embedded in the request path. |
+| `custom` | OpenAI-compatible with custom settings | For self-hosted gateways, proxies, and LLM aggregators. |
+
+All providers support streaming, tool calls, retries with backoff, and
+timeouts. The normalized message/tool model is identical across providers.
+
+Example: Claude via Anthropic
+
+```toml
+[llm]
+provider = "anthropic"
+base_url = "https://api.anthropic.com"
+model = "claude-3-5-sonnet-20241022"
+max_output_tokens = 8192
+```
+
+Example: a custom OpenAI-compatible gateway (e.g. OneAPI-style proxy)
+
+```toml
+[llm]
+provider = "custom"
+base_url = "https://gateway.example.com"
+model = "deepseek-chat"
+
+[llm.custom]
+chat_path = "/v1/chat/completions"
+api_key_header = "X-Api-Key"
+api_key_scheme = ""
+headers = { "X-Tenant" = "team-a" }
 ```
 
 ## Run

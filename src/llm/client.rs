@@ -1,5 +1,6 @@
-//! OpenAI-compatible chat client with bounded retries, timeouts, optional
-//! streaming, and Function Calling support.
+//! LLM gateway: shared transport, retries, and timeouts over a pluggable
+//! provider. Providers (OpenAI-compatible, Anthropic, Gemini, custom) live in
+//! `provider.rs` and own their wire formats.
 //!
 //! The API key is never logged. All responses are parsed strictly; malformed
 //! payloads fail loudly rather than being silently ignored.
@@ -9,12 +10,11 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use tracing::warn;
 
 use crate::config::LlmConfig;
 use crate::error::{Error, Result};
-use crate::kernel::event_store::ToolCall;
+use crate::llm::provider::{LlmProvider, StreamDelta, provider_from_config};
 
 /// The role of a chat message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,7 +26,7 @@ pub enum Role {
     Tool,
 }
 
-/// A chat message in the OpenAI wire format.
+/// A chat message in the normalized (provider-agnostic) format.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -34,7 +34,7 @@ pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
+    pub tool_calls: Option<Vec<crate::kernel::event_store::ToolCall>>,
 }
 
 impl Message {
@@ -65,7 +65,9 @@ impl Message {
         }
     }
 
-    pub fn assistant_with_tool_calls(tool_calls: Vec<ToolCall>) -> Message {
+    pub fn assistant_with_tool_calls(
+        tool_calls: Vec<crate::kernel::event_store::ToolCall>,
+    ) -> Message {
         Message {
             role: Role::Assistant,
             content: String::new(),
@@ -89,14 +91,14 @@ impl Message {
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
-    pub parameters: Value,
+    pub parameters: serde_json::Value,
 }
 
 /// The parsed model response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LLMResponse {
     pub content: String,
-    pub tool_calls: Vec<ToolCall>,
+    pub tool_calls: Vec<crate::kernel::event_store::ToolCall>,
     pub model: String,
     pub usage: Usage,
 }
@@ -109,74 +111,19 @@ pub struct Usage {
     pub total_tokens: u64,
 }
 
-/// A chat completion request in the OpenAI wire format.
-#[derive(Serialize)]
-struct ChatRequest<'a> {
-    model: &'a str,
-    messages: Vec<WireMessage<'a>>,
-    tools: Option<Vec<Value>>,
-    temperature: f32,
-    stream: bool,
-}
-
-#[derive(Serialize)]
-struct WireMessage<'a> {
-    role: &'a str,
-    content: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<Value>>,
-}
-
-impl<'a> From<&'a Message> for WireMessage<'a> {
-    fn from(m: &'a Message) -> WireMessage<'a> {
-        let role = match m.role {
-            Role::System => "system",
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => "tool",
-        };
-        let content = if m.content.is_empty() {
-            Value::Null
-        } else {
-            Value::String(m.content.clone())
-        };
-        let tool_calls = m.tool_calls.as_ref().map(|calls| {
-            calls
-                .iter()
-                .map(|call| {
-                    json!({
-                        "id": call.id,
-                        "type": "function",
-                        "function": {
-                            "name": call.name,
-                            "arguments": serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string())
-                        }
-                    })
-                })
-                .collect()
-        });
-        WireMessage {
-            role,
-            content,
-            tool_call_id: m.tool_call_id.as_deref(),
-            tool_calls,
-        }
-    }
-}
-
-/// The OpenAI-compatible client.
-#[derive(Debug, Clone)]
+/// The OpenAI-compatible client, provider-agnostic.
+#[derive(Debug)]
 pub struct LLMClient {
     api_key: String,
     base_url: String,
     model: String,
-    temperature: f32,
+    temperature: f64,
+    max_output_tokens: u64,
     request_timeout: Duration,
     max_retries: u32,
     retry_base_delay: Duration,
     http: reqwest::Client,
+    provider: Box<dyn LlmProvider>,
 }
 
 impl LLMClient {
@@ -197,11 +144,18 @@ impl LLMClient {
             base_url,
             model: config.model.clone(),
             temperature: config.temperature,
+            max_output_tokens: config.max_output_tokens,
             request_timeout: Duration::from_secs(config.request_timeout_secs),
             max_retries: config.max_retries,
             retry_base_delay: Duration::from_secs(config.retry_base_delay_secs),
             http,
+            provider: provider_from_config(config)?,
         })
+    }
+
+    /// The provider name, e.g. "openai" or "anthropic".
+    pub fn provider_name(&self) -> &str {
+        self.provider.name()
     }
 
     /// The model name this client talks to.
@@ -240,24 +194,24 @@ impl LLMClient {
         tools: &[ToolDefinition],
         mut on_delta: Option<impl FnMut(String)>,
     ) -> Result<LLMResponse> {
-        let wire_messages: Vec<WireMessage<'_>> = messages.iter().map(Into::into).collect();
-        let wire_tools = tools_to_schema(tools);
-        let body = ChatRequest {
-            model: &self.model,
-            messages: wire_messages,
-            tools: if wire_tools.is_empty() {
-                None
-            } else {
-                Some(wire_tools)
-            },
-            temperature: self.temperature,
-            stream: on_delta.is_some(),
-        };
+        let body = self.provider.build_body(
+            &self.model,
+            self.max_output_tokens,
+            messages,
+            tools,
+            self.temperature,
+            on_delta.is_some(),
+        )?;
 
         let mut attempts = 0;
         loop {
             attempts += 1;
-            let attempt = self.attempt(&body, on_delta.as_mut()).await;
+            let attempt = self
+                .attempt(
+                    &body,
+                    on_delta.as_mut().map(|cb| cb as &mut dyn FnMut(String)),
+                )
+                .await;
             match attempt {
                 Ok(response) => return Ok(response),
                 Err(e) if e.is_retryable() && attempts <= self.max_retries => {
@@ -292,17 +246,26 @@ impl LLMClient {
 
     async fn attempt(
         &self,
-        body: &ChatRequest<'_>,
-        mut on_delta: Option<impl FnMut(String)>,
+        body: &serde_json::Value,
+        on_delta: Option<&mut dyn FnMut(String)>,
     ) -> Result<LLMResponse> {
-        let url = format!("{}/chat/completions", self.base_url);
+        let url = format!(
+            "{}{}",
+            self.base_url,
+            self.provider.chat_path(&self.model, on_delta.is_some())
+        );
         let mut request = self
             .http
             .post(&url)
             .json(body)
             .timeout(self.request_timeout);
         if !self.api_key.is_empty() {
-            request = request.bearer_auth(&self.api_key);
+            for (name, value) in self.provider.auth_headers(&self.api_key) {
+                request = request.header(name, value);
+            }
+        }
+        for (name, value) in self.provider.extra_headers() {
+            request = request.header(name, value);
         }
 
         let response = request.send().await.map_err(|e| {
@@ -334,38 +297,32 @@ impl LLMClient {
             });
         }
 
-        if let Some(callback) = on_delta.as_mut() {
+        if let Some(callback) = on_delta {
             self.parse_stream(response, callback).await
         } else {
-            self.parse_json(response).await
+            let bytes = response.bytes().await.map_err(|e| Error::Llm {
+                message: format!("failed to read response body: {e}"),
+                retryable: true,
+            })?;
+            let value: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|e| Error::Llm {
+                    message: format!("malformed response JSON: {e}"),
+                    retryable: false,
+                })?;
+            self.provider.parse_completion(&value, &self.model)
         }
     }
 
-    /// Parse a non-streaming JSON response.
-    async fn parse_json(&self, response: reqwest::Response) -> Result<LLMResponse> {
-        let bytes = response.bytes().await.map_err(|e| Error::Llm {
-            message: format!("failed to read response body: {e}"),
-            retryable: true,
-        })?;
-        let value: Value = serde_json::from_slice(&bytes).map_err(|e| Error::Llm {
-            message: format!("malformed response JSON: {e}"),
-            retryable: false,
-        })?;
-        parse_completion(&value)
-    }
-
-    /// Parse an SSE stream of chat completion chunks.
+    /// Read an SSE stream and feed every `data:` payload to the provider's
+    /// stream parser, forwarding content deltas.
     async fn parse_stream(
         &self,
         response: reqwest::Response,
         on_delta: &mut dyn FnMut(String),
     ) -> Result<LLMResponse> {
+        let mut parser = self.provider.stream_parser();
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-        let mut content = String::new();
-        let mut model = String::new();
-        let mut usage = Usage::default();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| Error::Llm {
@@ -380,219 +337,25 @@ impl LLMClient {
                     continue;
                 }
                 let data = line[5..].trim();
-                if data == "[DONE]" {
-                    break;
-                }
-                let Ok(value) = serde_json::from_str::<Value>(data) else {
+                if data.is_empty() {
                     continue;
-                };
-                apply_chunk(
-                    &value,
-                    &mut content,
-                    &mut tool_calls,
-                    &mut model,
-                    &mut usage,
-                );
-                on_delta(content.clone());
-            }
-        }
-
-        if content.is_empty() && tool_calls.is_empty() {
-            return Err(Error::Llm {
-                message: "stream ended without content or tool calls".to_string(),
-                retryable: true,
-            });
-        }
-        for call in &mut tool_calls {
-            if let Value::String(args) = &call.arguments {
-                call.arguments = serde_json::from_str(args).map_err(|_| Error::Llm {
-                    message: format!(
-                        "malformed streamed tool call arguments for {}: {args}",
-                        call.name
-                    ),
-                    retryable: false,
-                })?;
-            }
-        }
-        Ok(LLMResponse {
-            content,
-            tool_calls,
-            model,
-            usage,
-        })
-    }
-}
-
-/// Convert tool definitions into the OpenAI Function Calling schema.
-pub fn tools_to_schema(tools: &[ToolDefinition]) -> Vec<Value> {
-    tools
-        .iter()
-        .map(|t| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
                 }
-            })
-        })
-        .collect()
-}
-
-/// Parse a full chat completion payload.
-fn parse_completion(value: &Value) -> Result<LLMResponse> {
-    let choices = value
-        .get("choices")
-        .and_then(Value::as_array)
-        .ok_or_else(|| Error::Llm {
-            message: format!(
-                "malformed response: missing choices: {}",
-                truncate(&value.to_string(), 200)
-            ),
-            retryable: false,
-        })?;
-    let message = choices
-        .first()
-        .and_then(|c| c.get("message"))
-        .ok_or_else(|| Error::Llm {
-            message: "malformed response: missing message".to_string(),
-            retryable: false,
-        })?;
-
-    let content = message
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-
-    let mut tool_calls = Vec::new();
-    if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
-        for call in calls {
-            let id = call
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let name = call
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let arguments = call
-                .get("function")
-                .and_then(|f| f.get("arguments"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| Error::Llm {
-                    message: "malformed tool call: missing arguments".to_string(),
-                    retryable: false,
-                })?;
-            let arguments: Value = serde_json::from_str(arguments).map_err(|_| Error::Llm {
-                message: format!("malformed tool call arguments for {name}: {arguments}"),
-                retryable: false,
-            })?;
-            tool_calls.push(ToolCall {
-                id,
-                name,
-                arguments,
-            });
-        }
-    }
-
-    let usage = value
-        .get("usage")
-        .map(|u| Usage {
-            prompt_tokens: u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-            completion_tokens: u
-                .get("completion_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            total_tokens: u.get("total_tokens").and_then(Value::as_u64).unwrap_or(0),
-        })
-        .unwrap_or_default();
-
-    Ok(LLMResponse {
-        content,
-        tool_calls,
-        model: value
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        usage,
-    })
-}
-
-/// Apply a streamed chunk to the accumulated response state.
-fn apply_chunk(
-    chunk: &Value,
-    content: &mut String,
-    tool_calls: &mut Vec<ToolCall>,
-    model: &mut String,
-    usage: &mut Usage,
-) {
-    if let Some(m) = chunk.get("model").and_then(Value::as_str)
-        && model.is_empty()
-    {
-        *model = m.to_string();
-    }
-    if let Some(u) = chunk.get("usage") {
-        if let Some(t) = u.get("total_tokens").and_then(Value::as_u64) {
-            usage.total_tokens = t;
-        }
-        if let Some(p) = u.get("prompt_tokens").and_then(Value::as_u64) {
-            usage.prompt_tokens = p;
-        }
-        if let Some(c) = u.get("completion_tokens").and_then(Value::as_u64) {
-            usage.completion_tokens = c;
-        }
-    }
-    let Some(delta) = chunk
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|c| c.first())
-        .and_then(|c| c.get("delta"))
-    else {
-        return;
-    };
-    if let Some(text) = delta.get("content").and_then(Value::as_str) {
-        content.push_str(text);
-    }
-    if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
-        for call in calls {
-            let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-            while tool_calls.len() <= index {
-                tool_calls.push(ToolCall {
-                    id: String::new(),
-                    name: String::new(),
-                    arguments: Value::Null,
-                });
+                if let Some(delta) = parser.on_event(data)? {
+                    match delta {
+                        StreamDelta::Content(text) => on_delta(text),
+                        StreamDelta::Done => {
+                            buffer.clear();
+                            break;
+                        }
+                    }
+                }
             }
-            let current = &mut tool_calls[index];
-            if let Some(id) = call.get("id").and_then(Value::as_str) {
-                current.id.push_str(id);
-            }
-            if let Some(name) = call
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(Value::as_str)
-            {
-                current.name.push_str(name);
-            }
-            if let Some(args) = call
-                .get("function")
-                .and_then(|f| f.get("arguments"))
-                .and_then(Value::as_str)
-            {
-                let mut acc = match &current.arguments {
-                    Value::String(s) => s.clone(),
-                    _ => String::new(),
-                };
-                acc.push_str(args);
-                current.arguments = Value::String(acc);
+            if buffer.is_empty() {
+                break;
             }
         }
+
+        parser.finish()
     }
 }
 
