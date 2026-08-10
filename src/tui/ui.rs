@@ -341,7 +341,7 @@ mod tests {
     fn dashboard_renders_without_panic() {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = App::new(false);
+        let app = App::new(false);
         terminal.draw(|frame| render(frame, &app)).unwrap();
         let buffer = terminal.backend().buffer();
         let content = buffer

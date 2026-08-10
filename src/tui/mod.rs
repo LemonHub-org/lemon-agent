@@ -69,16 +69,11 @@ async fn run_tui_inner(
     loop {
         terminal.draw(|frame| ui::render(frame, &app))?;
 
-        if event::poll(POLL_TIMEOUT)? {
-            match event::read()? {
-                Event::Key(key) => {
-                    let quit = app.on_key(key);
-                    if quit {
-                        break;
-                    }
-                }
-                _ => {}
-            }
+        if event::poll(POLL_TIMEOUT)?
+            && let Event::Key(key) = event::read()?
+            && app.on_key(key)
+        {
+            break;
         }
         app.refresh(&store, &live, &task_tx)?;
         if app.quit {

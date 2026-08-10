@@ -620,7 +620,7 @@ fn custom_provider_validation_rejects_bad_path() {
 
 #[test]
 fn unknown_provider_is_rejected() {
-    let mut cfg = LlmConfig {
+    let cfg = LlmConfig {
         provider: "ollama".to_string(),
         ..Default::default()
     };

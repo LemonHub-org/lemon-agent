@@ -191,10 +191,10 @@ impl App {
         live: &Arc<Mutex<LiveState>>,
         task_tx: &mpsc::Sender<String>,
     ) -> Result<()> {
-        if let Some(task) = self.submitted.take() {
-            if task_tx.try_send(task).is_err() {
-                self.error = Some("task queue is closed".to_string());
-            }
+        if let Some(task) = self.submitted.take()
+            && task_tx.try_send(task).is_err()
+        {
+            self.error = Some("task queue is closed".to_string());
         }
         let live = live.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let continuity_changed = live.continuity_id != self.last_continuity;
