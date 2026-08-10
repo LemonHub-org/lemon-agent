@@ -8,6 +8,7 @@
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod evolution;
 pub mod kernel;
 pub mod llm;
 pub mod logging;
