@@ -206,5 +206,11 @@ impl Error {
     }
 }
 
+impl From<io::Error> for Error {
+    fn from(source: io::Error) -> Self {
+        Error::Io { path: None, source }
+    }
+}
+
 /// Convenience result alias used throughout the core.
 pub type Result<T> = std::result::Result<T, Error>;

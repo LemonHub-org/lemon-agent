@@ -4,6 +4,46 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+/// Immutable budget limits reused when starting each continuity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BudgetLimits {
+    pub max_steps: usize,
+    pub max_input_tokens: usize,
+    pub max_llm_calls: usize,
+    pub max_tool_calls: usize,
+    pub max_wall_clock_secs: u64,
+}
+
+impl BudgetLimits {
+    pub fn new(
+        max_steps: usize,
+        max_input_tokens: usize,
+        max_llm_calls: usize,
+        max_tool_calls: usize,
+        max_wall_clock_secs: u64,
+    ) -> BudgetLimits {
+        BudgetLimits {
+            max_steps,
+            max_input_tokens,
+            max_llm_calls,
+            max_tool_calls,
+            max_wall_clock_secs,
+        }
+    }
+
+    /// A fresh budget with zeroed usage counters.
+    pub fn new_budget(self, started_at_ms: u64) -> Budget {
+        Budget::new(
+            self.max_steps,
+            self.max_input_tokens,
+            self.max_llm_calls,
+            self.max_tool_calls,
+            self.max_wall_clock_secs,
+            started_at_ms,
+        )
+    }
+}
+
 /// The budget and its live usage counters.
 ///
 /// Usage counters are derived from persisted events on recovery, so a

@@ -1,10 +1,10 @@
 //! Lemon Agent entry point: parse CLI arguments, load configuration, and run
-//! the agent loop.
+//! the agent loop or the terminal UI.
 
 use std::process::ExitCode;
 
 use clap::Parser;
-use lemon_agent::cli::Cli;
+use lemon_agent::cli::{Cli, Command};
 use lemon_agent::config::Config;
 use lemon_agent::error::Result;
 use lemon_agent::scheduler::Agent;
@@ -24,6 +24,17 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if let Some(Command::Tui {
+        monitor,
+        config,
+        task,
+    }) = &cli.command
+    {
+        let config = Config::load(config)?;
+        config.validate()?;
+        return lemon_agent::tui::run_tui(&config, task.clone(), *monitor).await;
+    }
+
     let mut config = Config::load(&cli.config)?;
     config.apply_cli_overrides(&cli);
     config.validate()?;

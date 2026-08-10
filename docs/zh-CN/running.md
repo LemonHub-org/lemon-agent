@@ -120,6 +120,27 @@ summary: task completed successfully. steps 3/200; ...
 不带 `--task` 启动时，agent 进入 Idle 状态并干净退出。首次运行之后，
 重启时会自动恢复未完成的连续性任务。
 
+## 终端界面 (TUI)
+
+```bash
+lemon-agent tui                        # 运行 agent 并显示实时看板
+lemon-agent tui --task "实现斐波那契"
+lemon-agent tui --monitor              # 只监视已有的 agent.db
+```
+
+TUI 将 agent 作为守护进程运行，可以在终端中直接操作：
+
+- **看板**：当前状态、步骤数、预算用量、最近错误、最终报告和实时事件日志。
+- **任务提交**：在底部输入任务并按 Enter；任务排队依次执行，每个任务
+  都是独立的连续性。
+- **连续性列表**：按 `c` 查看所有连续性（步骤数、是否完成、开始时间）；
+  Enter 打开选中项的完整事件日志。
+- **监视模式**：`--monitor` 只读方式附加到已有的 `agent.db`（例如由独立
+  守护进程写入的数据库）。
+
+按键：`Tab` 切换输入/日志焦点，`Enter` 提交，`↑`/`↓`/`PgUp`/`PgDn`
+滚动，`c` 连续性列表，`d` 详情，`Esc` 返回，`Ctrl+C` 退出。
+
 ## Docker
 
 ```bash

@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use tokio::sync::{mpsc, watch};
+
 use crate::error::{Error, Result};
 use crate::evolution::{
     EvolutionContext, EvolutionOutcome, STRATEGY_SCRIPT, ValidationSpec, recent_messages,
@@ -11,7 +13,7 @@ use crate::evolution::{
 use crate::kernel::event_store::{EventType, now_ms};
 use crate::llm::Message;
 use crate::scheduler::plan::KNOWN_TOOLS;
-use crate::scheduler::{Agent, AgentState, ContinuityReport, TerminationReason};
+use crate::scheduler::{Agent, AgentState, ContinuityReport, LiveState, TerminationReason};
 
 const PLAN_SYSTEM_PROMPT: &str = r#"You are Lemon Agent, an autonomous software engineering agent running inside a sandboxed working directory. You receive a task, inspect the workspace with tools, modify files, and verify your work by running commands.
 
@@ -57,7 +59,10 @@ impl Agent {
             if self.state == AgentState::Idle && self.pending_task.is_none() {
                 break;
             }
-            if let Some(event) = self.maybe_heartbeat()? {
+            if self.state == AgentState::Idle {
+                // A task is pending; skip the heartbeat so it never lands on
+                // the stale pre-continuity id.
+            } else if let Some(event) = self.maybe_heartbeat()? {
                 self.store.append(&self.continuity_id, &event)?;
             }
             if let Err(e) = self.budget.check(now_ms()) {
@@ -89,6 +94,93 @@ impl Agent {
         self.finish().await
     }
 
+    /// Run continuously as a daemon: process tasks from `tasks` one after
+    /// another, publishing a live snapshot after every transition, until the
+    /// channel is closed or `shutdown` flips. Used by the TUI.
+    pub async fn run_daemon(
+        &mut self,
+        mut tasks: mpsc::Receiver<String>,
+        mut shutdown: watch::Receiver<bool>,
+        mut on_update: impl FnMut(&LiveState) + Send + 'static,
+    ) -> Result<()> {
+        loop {
+            if *shutdown.borrow() {
+                break;
+            }
+            if self.state == AgentState::Idle && self.pending_task.is_none() {
+                tokio::select! {
+                    _ = shutdown.changed() => break,
+                    task = tasks.recv() => match task {
+                        Some(task) => {
+                            self.pending_task = Some(task);
+                            self.emit_live(&mut on_update);
+                        }
+                        None => break,
+                    },
+                }
+                continue;
+            }
+            if self.state == AgentState::Terminated {
+                // A transition terminated the continuity (planning failure,
+                // evolution failure): persist the report and go back to
+                // waiting for the next task.
+                self.finish().await?;
+                self.emit_live(&mut on_update);
+                continue;
+            }
+            if self.state == AgentState::Idle {
+                // A task is pending; the heartbeat would land on the stale
+                // continuity id, so skip it and let the Idle handler start
+                // the new continuity.
+            } else if let Some(event) = self.maybe_heartbeat()? {
+                self.store.append(&self.continuity_id, &event)?;
+            }
+            if let Err(e) = self.budget.check(now_ms()) {
+                tracing::error!(
+                    continuity_id = %self.continuity_id,
+                    code = %e.code(),
+                    error = %e,
+                    "budget exhausted"
+                );
+                self.termination = Some(TerminationReason::BudgetExhausted(e.to_string()));
+                self.state = AgentState::Terminated;
+            }
+            if self.state == AgentState::Terminated {
+                self.finish().await?;
+                self.emit_live(&mut on_update);
+                continue;
+            }
+
+            let (next, events) = self.transition().await?;
+            self.state = next;
+            self.store.append_many(&self.continuity_id, &events)?;
+            tracing::info!(
+                continuity_id = %self.continuity_id,
+                state = %self.state.as_str(),
+                step_num = self.budget.steps_used,
+                events = events.len(),
+                "state transition complete"
+            );
+            self.maybe_snapshot()?;
+            self.emit_live(&mut on_update);
+            tokio::time::sleep(Duration::from_millis(self.loop_sleep_ms)).await;
+        }
+        Ok(())
+    }
+
+    /// Build the live snapshot published to observers.
+    fn emit_live(&self, on_update: &mut impl FnMut(&LiveState)) {
+        on_update(&LiveState {
+            continuity_id: self.continuity_id.clone(),
+            state: self.state,
+            step_num: self.budget.steps_used,
+            budget_summary: self.budget.summary(now_ms()),
+            last_error: self.plan_failed_reason.clone(),
+            report: self.last_report.clone(),
+            idle: self.state == AgentState::Idle,
+        });
+    }
+
     /// Handle one state transition, returning the next state and the events
     /// to persist.
     async fn transition(&mut self) -> Result<(AgentState, Vec<EventType>)> {
@@ -106,6 +198,20 @@ impl Agent {
 
     async fn handle_idle(&mut self) -> Result<(AgentState, Vec<EventType>)> {
         if let Some(task) = self.pending_task.take() {
+            // Every task is its own continuity: fresh id, context, budget,
+            // and evolution budget, so a daemon processing many tasks never
+            // inherits state from a previous one.
+            self.continuity_id = uuid::Uuid::new_v4().to_string();
+            self.sandbox.set_continuity(&self.continuity_id);
+            self.scripts.set_continuity(&self.continuity_id);
+            self.evolution.set_attempts_used(0);
+            self.evolution_attempts = 0;
+            self.budget = self.budget_limits.new_budget(now_ms());
+            self.ctx =
+                crate::scheduler::Context::new(self.max_context_tokens, self.keep_recent_messages);
+            self.last_report = None;
+            self.plan_failed_reason = None;
+            self.plan = None;
             self.initial_prompt = task.clone();
             self.store.append(
                 &self.continuity_id,
@@ -374,6 +480,7 @@ impl Agent {
                 summary: report.summary.clone(),
             },
         )?;
+        self.last_report = Some(report.clone());
         self.state = AgentState::Idle;
         Ok(report)
     }

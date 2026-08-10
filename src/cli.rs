@@ -2,12 +2,16 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 /// An unattended autonomous programming agent.
 #[derive(Debug, Parser)]
 #[command(name = "lemon-agent", version, about)]
 pub struct Cli {
+    /// The terminal user interface (runs the agent with a live dashboard).
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Path to the TOML configuration file.
     #[arg(short, long, value_name = "FILE", default_value = "config.toml")]
     pub config: PathBuf,
@@ -41,4 +45,24 @@ pub struct Cli {
     /// AGENT_LLM_PROVIDER).
     #[arg(long, value_name = "PROVIDER")]
     pub llm_provider: Option<String>,
+}
+
+/// Modes of the agent.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Open the terminal UI: run the agent with a live dashboard and task
+    /// submission, or watch an existing event store.
+    Tui {
+        /// Watch an existing agent.db without running the agent.
+        #[arg(long)]
+        monitor: bool,
+
+        /// Path to the TOML configuration file.
+        #[arg(short, long, value_name = "FILE", default_value = "config.toml")]
+        config: PathBuf,
+
+        /// Submit this task when the TUI starts.
+        #[arg(short, long, value_name = "TASK")]
+        task: Option<String>,
+    },
 }

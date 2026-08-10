@@ -24,6 +24,33 @@ pub use budget::Budget;
 pub use context::Context;
 pub use plan::{Plan, PlanStep};
 
+/// A cheap snapshot of the running agent, published to observers such as the
+/// TUI. Derived from live state, not from the event store.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveState {
+    pub continuity_id: String,
+    pub state: AgentState,
+    pub step_num: usize,
+    pub budget_summary: String,
+    pub last_error: Option<String>,
+    pub report: Option<ContinuityReport>,
+    pub idle: bool,
+}
+
+impl Default for LiveState {
+    fn default() -> Self {
+        LiveState {
+            continuity_id: String::new(),
+            state: AgentState::Idle,
+            step_num: 0,
+            budget_summary: String::new(),
+            last_error: None,
+            report: None,
+            idle: true,
+        }
+    }
+}
+
 /// The agent's finite state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,12 +113,14 @@ pub struct Agent {
     pub state: AgentState,
     pub ctx: Context,
     pub budget: Budget,
+    pub budget_limits: budget::BudgetLimits,
     pub plan: Option<Plan>,
     pub plan_failed_reason: Option<String>,
     pub evolution_attempts: usize,
     pub initial_prompt: String,
     pub termination: Option<TerminationReason>,
     pub pending_task: Option<String>,
+    pub last_report: Option<ContinuityReport>,
     pub max_evolution_attempts: usize,
     pub heartbeat_interval_secs: u64,
     pub snapshot_interval_steps: usize,
@@ -143,13 +172,20 @@ impl Agent {
             continuity_id: String::new(),
             state: AgentState::Idle,
             ctx: Context::new(config.agent.max_context_tokens, 6),
-            budget: Budget::new(
+            budget: budget::BudgetLimits::new(
                 config.agent.max_steps,
                 config.agent.max_input_tokens,
                 config.agent.max_llm_calls,
                 config.agent.max_tool_calls,
                 config.agent.max_wall_clock_secs,
-                crate::kernel::event_store::now_ms(),
+            )
+            .new_budget(crate::kernel::event_store::now_ms()),
+            budget_limits: budget::BudgetLimits::new(
+                config.agent.max_steps,
+                config.agent.max_input_tokens,
+                config.agent.max_llm_calls,
+                config.agent.max_tool_calls,
+                config.agent.max_wall_clock_secs,
             ),
             plan: None,
             plan_failed_reason: None,
@@ -157,6 +193,7 @@ impl Agent {
             initial_prompt: String::new(),
             termination: None,
             pending_task: None,
+            last_report: None,
             max_evolution_attempts: config.agent.max_evolution_attempts,
             heartbeat_interval_secs: config.agent.heartbeat_interval_secs,
             snapshot_interval_steps: config.agent.snapshot_interval_steps,

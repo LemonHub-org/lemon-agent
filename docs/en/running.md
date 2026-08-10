@@ -122,6 +122,28 @@ summary: task completed successfully. steps 3/200; ...
 A run with no `--task` starts in the Idle state and exits cleanly. After the
 first run, an unfinished continuity is resumed automatically on restart.
 
+## Terminal UI
+
+```bash
+lemon-agent tui                        # run the agent with a live dashboard
+lemon-agent tui --task "implement fibonacci"
+lemon-agent tui --monitor              # watch an existing agent.db only
+```
+
+The TUI runs the agent as a daemon and lets you operate it from the terminal:
+
+- **Dashboard**: current state, step count, budget usage, last error, final
+  report, and a live event log.
+- **Task submission**: type a task at the bottom and press Enter; tasks queue
+  up and run one after another, each as its own continuity.
+- **Continuities**: `c` opens the list of all continuities (steps, finished,
+  started); Enter opens the full event log of the selected one.
+- **Monitor mode**: `--monitor` attaches read-only to an existing `agent.db`
+  (for example one written by a separate daemon process).
+
+Keys: `Tab` focus input/log, `Enter` submit, `↑`/`↓`/`PgUp`/`PgDn` scroll,
+`c` continuities, `d` detail, `Esc` back, `Ctrl+C` quit.
+
 ## Docker
 
 ```bash

@@ -183,7 +183,7 @@ impl LLMClient {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
-        on_delta: impl FnMut(String),
+        on_delta: impl FnMut(String) + Send,
     ) -> Result<LLMResponse> {
         self.chat_inner(messages, tools, Some(on_delta)).await
     }
@@ -192,7 +192,7 @@ impl LLMClient {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
-        mut on_delta: Option<impl FnMut(String)>,
+        mut on_delta: Option<impl FnMut(String) + Send>,
     ) -> Result<LLMResponse> {
         let body = self.provider.build_body(
             &self.model,
@@ -209,7 +209,9 @@ impl LLMClient {
             let attempt = self
                 .attempt(
                     &body,
-                    on_delta.as_mut().map(|cb| cb as &mut dyn FnMut(String)),
+                    on_delta
+                        .as_mut()
+                        .map(|cb| cb as &mut (dyn FnMut(String) + Send)),
                 )
                 .await;
             match attempt {
@@ -247,7 +249,7 @@ impl LLMClient {
     async fn attempt(
         &self,
         body: &serde_json::Value,
-        on_delta: Option<&mut dyn FnMut(String)>,
+        on_delta: Option<&mut (dyn FnMut(String) + Send)>,
     ) -> Result<LLMResponse> {
         let url = format!(
             "{}{}",
@@ -318,7 +320,7 @@ impl LLMClient {
     async fn parse_stream(
         &self,
         response: reqwest::Response,
-        on_delta: &mut dyn FnMut(String),
+        on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<LLMResponse> {
         let mut parser = self.provider.stream_parser();
         let mut stream = response.bytes_stream();

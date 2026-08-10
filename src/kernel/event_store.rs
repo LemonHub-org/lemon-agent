@@ -117,6 +117,15 @@ pub struct StoredSnapshot {
     pub state: Value,
 }
 
+/// One row of the continuity overview used by the TUI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContinuitySummary {
+    pub continuity_id: String,
+    pub steps: usize,
+    pub started_at_ms: u64,
+    pub finished: bool,
+}
+
 /// The SQLite-backed event store.
 ///
 /// All methods are synchronous and short-lived; callers must not hold the
@@ -342,6 +351,48 @@ impl EventStore {
             out.push(id.map_err(Error::Database)?);
         }
         Ok(out)
+    }
+
+    /// A compact overview of every continuity, newest last-event first.
+    pub fn continuity_summaries(&self) -> Result<Vec<ContinuitySummary>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| Error::Internal("event store mutex poisoned".to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.continuity_id,
+                        COUNT(CASE WHEN e.event_type = 'StepStarted' THEN 1 END),
+                        MIN(e.timestamp),
+                        EXISTS(SELECT 1 FROM events f
+                               WHERE f.continuity_id = e.continuity_id
+                                 AND f.event_type = 'ContinuityFinished')
+                 FROM events e
+                 GROUP BY e.continuity_id
+                 ORDER BY MAX(e.seq) DESC",
+            )
+            .map_err(Error::Database)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(Error::Database)?;
+        let mut summaries = Vec::new();
+        for row in rows {
+            let (continuity_id, steps, started_at_ms, finished) = row.map_err(Error::Database)?;
+            summaries.push(ContinuitySummary {
+                continuity_id,
+                steps: steps.max(0) as usize,
+                started_at_ms: started_at_ms.max(0) as u64,
+                finished: finished != 0,
+            });
+        }
+        Ok(summaries)
     }
 
     /// The newest snapshot across all continuities.
