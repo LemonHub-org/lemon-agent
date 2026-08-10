@@ -176,8 +176,22 @@ impl Agent {
                     agent.restore_from_snapshot(&snapshot)?;
                     true
                 } else {
+                    // Crashed before the first snapshot: restart the task
+                    // from the initial prompt recorded at ContinuityStarted.
+                    let events = store.events_after(&continuity_id, 0)?;
+                    let prompt = events
+                        .iter()
+                        .find_map(|e| match &e.event {
+                            EventType::ContinuityStarted { initial_prompt } => {
+                                Some(initial_prompt.clone())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default();
                     agent.continuity_id = continuity_id;
-                    false
+                    agent.initial_prompt = prompt;
+                    agent.state = AgentState::Planning;
+                    true
                 }
             }
             None => false,
@@ -201,6 +215,8 @@ impl Agent {
         self.continuity_id = snapshot.continuity_id.clone();
         self.restore_from_value(&snapshot.state)?;
         let events = self.store.events_after(&self.continuity_id, snapshot.seq)?;
+        self.store
+            .verify_continuity(&self.continuity_id, snapshot.seq)?;
         for stored in &events {
             self.apply_event_for_accounting(&stored.event);
         }
@@ -326,17 +342,5 @@ impl Agent {
         self.last_heartbeat_at_ms = now;
         self.last_heartbeat_step = self.budget.steps_used;
         Ok(Some(EventType::Heartbeat { steps_since_last }))
-    }
-
-    /// Record an error event with the current continuity context.
-    pub fn record_error(&self, error: &str, recoverable: bool) -> Result<()> {
-        self.store.append(
-            &self.continuity_id,
-            &EventType::Error {
-                error: error.to_string(),
-                recoverable,
-            },
-        )?;
-        Ok(())
     }
 }

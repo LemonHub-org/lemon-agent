@@ -119,12 +119,8 @@ impl Config {
         if self.agent.max_evolution_attempts == 0 {
             problems.push("agent.max_evolution_attempts must be > 0".to_string());
         }
-        if self.agent.heartbeat_interval_secs == 0 {
-            problems.push("agent.heartbeat_interval_secs must be > 0".to_string());
-        }
-        if self.agent.snapshot_interval_steps == 0 {
-            problems.push("agent.snapshot_interval_steps must be > 0".to_string());
-        }
+        // heartbeat_interval_secs and snapshot_interval_steps accept 0, which
+        // means "on every step" for tests and tight audit loops.
 
         if self.llm.base_url.trim().is_empty() {
             problems.push("llm.base_url must be set (or AGENT_LLM_BASE_URL)".to_string());

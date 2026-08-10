@@ -329,6 +329,48 @@ async fn creates_script_when_missing_and_rolls_back_to_nothing() {
     assert!(!f.scripts_dir.join("plan_and_execute.rhai.bak").exists());
 }
 
+#[tokio::test]
+async fn candidate_cannot_bypass_sandbox_whitelist() {
+    let mut server = mockito::Server::new_async().await;
+    // The candidate calls a command outside the whitelist; its self-test must
+    // fail in isolation, so the candidate is rejected and rolled back.
+    let dangerous = r#"
+fn execute_plan(plan) {
+    exec_command("rm", ["-rf", "/"]);
+    "ok"
+}
+
+fn test_plan_and_execute() {
+    let out = exec_command("rm", ["-rf", "/"]);
+    "ran"
+}
+"#;
+    server
+        .mock("POST", "/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(completion(dangerous).to_string())
+        .create_async()
+        .await;
+
+    let mut f = fixture(&server.url());
+    std::fs::write(f.scripts_dir.join("plan_and_execute.rhai"), DEFECTIVE).unwrap();
+    f.engine.reload("plan_and_execute").unwrap();
+
+    let outcome = f.evolution.attempt(&context(&f)).await.unwrap();
+    match outcome {
+        EvolutionOutcome::Failed { reason } => {
+            assert!(reason.contains("isolation"), "{reason}");
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(f.scripts_dir.join("plan_and_execute.rhai")).unwrap(),
+        DEFECTIVE,
+        "whitelist bypass candidate must be rolled back"
+    );
+}
+
 #[test]
 fn sha256_hex_is_stable() {
     let hash = sha256_hex(b"hello");

@@ -61,6 +61,12 @@ impl Agent {
                 self.store.append(&self.continuity_id, &event)?;
             }
             if let Err(e) = self.budget.check(now_ms()) {
+                tracing::error!(
+                    continuity_id = %self.continuity_id,
+                    code = %e.code(),
+                    error = %e,
+                    "budget exhausted"
+                );
                 self.termination = Some(TerminationReason::BudgetExhausted(e.to_string()));
                 self.state = AgentState::Terminated;
                 break;
@@ -69,6 +75,13 @@ impl Agent {
             let (next, events) = self.transition().await?;
             self.state = next;
             self.store.append_many(&self.continuity_id, &events)?;
+            tracing::info!(
+                continuity_id = %self.continuity_id,
+                state = %self.state.as_str(),
+                step_num = self.budget.steps_used,
+                events = events.len(),
+                "state transition complete"
+            );
             self.maybe_snapshot()?;
             tokio::time::sleep(Duration::from_millis(self.loop_sleep_ms)).await;
         }
@@ -264,6 +277,11 @@ impl Agent {
         match self.evolution.attempt(&ctx).await? {
             EvolutionOutcome::Fixed { message, .. } => {
                 self.evolution_attempts = self.evolution.attempts_used();
+                tracing::info!(
+                    continuity_id = %self.continuity_id,
+                    attempt = self.evolution_attempts,
+                    "strategy script evolved; re-executing plan"
+                );
                 events.push(EventType::Error {
                     error: format!("script evolved: {message}"),
                     recoverable: true,
@@ -273,6 +291,12 @@ impl Agent {
             }
             EvolutionOutcome::Failed { reason } => {
                 self.evolution_attempts = self.evolution.attempts_used();
+                tracing::error!(
+                    continuity_id = %self.continuity_id,
+                    attempt = self.evolution_attempts,
+                    error = %reason,
+                    "evolution failed"
+                );
                 self.termination = Some(TerminationReason::Failed(format!(
                     "evolution failed: {reason}"
                 )));

@@ -371,6 +371,50 @@ impl EventStore {
             }),
         )
     }
+
+    /// Verify that a continuity's event sequence is gapless from
+    /// `expected_next` to its maximum. Fails loudly when any event was lost,
+    /// so recovery never silently continues from an inconsistent log.
+    pub fn verify_continuity(&self, continuity_id: &str, expected_next: u64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| Error::Internal("event store mutex poisoned".to_string()))?;
+        let max_seq: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(seq) FROM events WHERE continuity_id = ?1",
+                [continuity_id],
+                |row| row.get(0),
+            )
+            .map_err(Error::Database)?;
+        let Some(max_seq) = max_seq else {
+            return Ok(());
+        };
+        let max_seq = max_seq as u64;
+        if expected_next > max_seq {
+            return Err(Error::Internal(format!(
+                "event log for {continuity_id} is behind the snapshot: snapshot seq {expected_next} > max seq {max_seq}"
+            )));
+        }
+        if expected_next == max_seq {
+            return Ok(());
+        }
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE continuity_id = ?1 AND seq BETWEEN ?2 AND ?3",
+                rusqlite::params![continuity_id, expected_next as i64, max_seq as i64],
+                |row| row.get(0),
+            )
+            .map_err(Error::Database)?;
+        let expected = max_seq - expected_next + 1;
+        if count as u64 != expected {
+            return Err(Error::Internal(format!(
+                "event log for {continuity_id} has a gap: expected {} events in [{expected_next}, {max_seq}], found {count}",
+                expected
+            )));
+        }
+        Ok(())
+    }
 }
 
 const SCHEMA: &str = r#"
@@ -617,6 +661,95 @@ mod tests {
         store.save_snapshot("b", 2, &json!({"x": 2})).unwrap();
         let snap = store.newest_snapshot().unwrap().unwrap();
         assert_eq!(snap.continuity_id, "b");
+    }
+
+    #[test]
+    fn gapless_logs_pass_verification() {
+        let (_dir, store) = open_temp();
+        store
+            .append_many("c1", &[EventType::StepStarted { step_num: 1 }])
+            .unwrap();
+        store
+            .append_many("c1", &[EventType::StepStarted { step_num: 2 }])
+            .unwrap();
+        assert!(store.verify_continuity("c1", 1).is_ok());
+        assert!(store.verify_continuity("c1", 2).is_ok());
+        assert!(
+            store.verify_continuity("c1", 3).is_err(),
+            "snapshot past the log must fail"
+        );
+    }
+
+    #[test]
+    fn missing_events_fail_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = EventStore::open(&path).unwrap();
+        store
+            .append_many("c1", &[EventType::StepStarted { step_num: 1 }])
+            .unwrap();
+        store
+            .append_many("c1", &[EventType::StepStarted { step_num: 2 }])
+            .unwrap();
+        store
+            .append_many("c1", &[EventType::StepStarted { step_num: 3 }])
+            .unwrap();
+        drop(store);
+
+        // Simulate event loss by deleting the middle row directly.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "DELETE FROM events WHERE continuity_id = 'c1' AND seq = 2",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = EventStore::open(&path).unwrap();
+        let err = store.verify_continuity("c1", 1).unwrap_err();
+        assert!(err.to_string().contains("gap"), "{err}");
+        assert_eq!(err.code(), ErrorCode::Internal);
+    }
+
+    #[test]
+    fn snapshot_behind_log_fails_verification() {
+        let (_dir, store) = open_temp();
+        store
+            .append_many("c1", &[EventType::StepStarted { step_num: 1 }])
+            .unwrap();
+        store.save_snapshot("c1", 5, &json!({"x": 1})).unwrap();
+        let err = store.verify_continuity("c1", 5).unwrap_err();
+        assert!(err.to_string().contains("behind"), "{err}");
+    }
+
+    #[test]
+    fn concurrent_appends_across_connections_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store_a = EventStore::open(&path).unwrap();
+        let store_b = EventStore::open(&path).unwrap();
+        store_a
+            .append("c1", &EventType::StepStarted { step_num: 1 })
+            .unwrap();
+        store_b
+            .append("c1", &EventType::StepStarted { step_num: 2 })
+            .unwrap();
+        store_a
+            .append("c1", &EventType::StepStarted { step_num: 3 })
+            .unwrap();
+        let events = store_a.events_after("c1", 0).unwrap();
+        assert_eq!(events.len(), 3);
+        let seqs: Vec<u64> = events.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn opening_a_directory_as_db_fails_loudly() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("not_a_file");
+        std::fs::create_dir_all(&sub).unwrap();
+        let err = EventStore::open(&sub).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::Database);
     }
 
     use crate::error::ErrorCode;

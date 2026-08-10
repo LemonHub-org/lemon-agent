@@ -481,6 +481,78 @@ async fn missing_strategy_script_evolves_one_into_existence() {
     let _ = dir;
 }
 
+#[tokio::test]
+async fn budget_boundary_single_step_terminates() {
+    let mut server = mockito::Server::new_async().await;
+    let plan = json!({
+        "steps": [
+            {"name": "write", "tool": "write_file", "args": {"path": "a.txt", "content": "x"}}
+        ]
+    });
+    server
+        .mock("POST", "/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(completion(&plan.to_string()).to_string())
+        .create_async()
+        .await;
+
+    let (dir, mut config) = fixture(&server.url());
+    config.agent.max_steps = 1;
+    write_strategy(&config, WORKING_SCRIPT);
+    let mut agent = Agent::new(&config, Some("one step only".to_string())).unwrap();
+    let report = agent.run().await.unwrap();
+    assert_eq!(report.status, "budget_exhausted", "{}", report.summary);
+    assert_eq!(report.steps_used, 1);
+    let _ = dir;
+}
+
+#[tokio::test]
+async fn resumes_continuity_without_snapshot_from_started_event() {
+    let mut server = mockito::Server::new_async().await;
+    let plan = json!({
+        "steps": [
+            {"name": "write", "tool": "write_file", "args": {"path": "a.txt", "content": "recovered"}}
+        ]
+    });
+    server
+        .mock("POST", "/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(completion(&plan.to_string()).to_string())
+        .create_async()
+        .await;
+
+    let (dir, config) = fixture(&server.url());
+    write_strategy(&config, WORKING_SCRIPT);
+
+    // Crash right after the continuity started, before any snapshot existed.
+    let store = EventStore::open(&config.agent.db_path).unwrap();
+    store
+        .append(
+            "cont-nosnap",
+            &EventType::ContinuityStarted {
+                initial_prompt: "crashed task".to_string(),
+            },
+        )
+        .unwrap();
+    drop(store);
+
+    let mut agent = Agent::new(&config, Some("ignored".to_string())).unwrap();
+    assert_eq!(agent.continuity_id, "cont-nosnap");
+    assert_eq!(
+        agent.initial_prompt, "crashed task",
+        "prompt must be recovered"
+    );
+    let report = agent.run().await.unwrap();
+    assert_eq!(report.continuity_id, "cont-nosnap");
+    assert_eq!(report.status, "completed", "{}", report.summary);
+    assert!(
+        std::fs::read_to_string(dir.path().join("workspace/a.txt")).is_ok(),
+        "restarted task must complete its plan"
+    );
+}
+
 #[test]
 fn plan_validation_rejects_unknown_tools() {
     let content = r#"{"steps": [{"name": "evil", "tool": "delete_everything", "args": {}}]}"#;
